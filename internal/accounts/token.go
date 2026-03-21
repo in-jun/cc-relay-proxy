@@ -1,0 +1,134 @@
+// Package accounts manages OAuth tokens and rate-limit state for N Anthropic accounts.
+package accounts
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"sync"
+	"time"
+)
+
+const (
+	ClientID           = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	TokenURL           = "https://platform.claude.com/v1/oauth/token"
+	Scopes             = "user:inference user:profile user:sessions:claude_code user:mcp_servers user:file_upload"
+	TokenRefreshMargin = 5 * time.Minute
+	refreshTimeout     = 15 * time.Second
+)
+
+// Token holds an account's current OAuth credentials.
+type Token struct {
+	mu           sync.RWMutex
+	accessToken  string
+	refreshToken string
+	expiresAt    time.Time
+}
+
+// newToken creates a Token seeded with a refresh token only.
+// AccessToken is empty until the first Ensure call.
+func newToken(refreshToken string) *Token {
+	return &Token{refreshToken: refreshToken}
+}
+
+// Ensure returns a valid access token, refreshing if needed.
+// It is safe to call concurrently; at most one refresh runs at a time.
+func (t *Token) Ensure(ctx context.Context) (string, error) {
+	// Fast path: still valid
+	t.mu.RLock()
+	if t.accessToken != "" && time.Now().Add(TokenRefreshMargin).Before(t.expiresAt) {
+		tok := t.accessToken
+		t.mu.RUnlock()
+		return tok, nil
+	}
+	t.mu.RUnlock()
+
+	// Slow path: refresh
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	// Double-check after acquiring write lock
+	if t.accessToken != "" && time.Now().Add(TokenRefreshMargin).Before(t.expiresAt) {
+		return t.accessToken, nil
+	}
+	return t.refresh(ctx)
+}
+
+// refresh performs the OAuth token exchange. Must be called with write lock held.
+func (t *Token) refresh(ctx context.Context) (string, error) {
+	body, _ := json.Marshal(map[string]string{
+		"grant_type":    "refresh_token",
+		"refresh_token": t.refreshToken,
+		"client_id":     ClientID,
+		"scope":         Scopes,
+	})
+
+	rctx, cancel := context.WithTimeout(ctx, refreshTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, TokenURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("token refresh: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("token refresh: http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("token refresh: read body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("token refresh: status %d: %s", resp.StatusCode, raw)
+	}
+
+	var result struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"` // seconds
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return "", fmt.Errorf("token refresh: parse response: %w", err)
+	}
+	if result.AccessToken == "" {
+		return "", fmt.Errorf("token refresh: empty access_token in response")
+	}
+
+	t.accessToken = result.AccessToken
+	// RTR: keep existing refresh token if server didn't return a new one
+	if result.RefreshToken != "" {
+		t.refreshToken = result.RefreshToken
+	}
+	t.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
+	return t.accessToken, nil
+}
+
+// ExpiresAt returns when the current access token expires (zero if none).
+func (t *Token) ExpiresAt() time.Time {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.expiresAt
+}
+
+// ExpiresIn returns a human-readable time until expiry.
+func (t *Token) ExpiresIn() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.accessToken == "" {
+		return "not refreshed"
+	}
+	d := time.Until(t.expiresAt)
+	if d <= 0 {
+		return "expired"
+	}
+	if d >= time.Hour {
+		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%dm", int(d.Minutes()))
+}
