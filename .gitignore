@@ -1,0 +1,17 @@
+# Agent workspace — never push
+.claude/
+
+# Build output
+cc-relay-proxy
+cc-relay-proxy.exe
+
+# Runtime logs
+logs/
+
+# Go toolchain
+*.test
+*.out
+
+# Env files (contain refresh tokens)
+.env
+*.env
