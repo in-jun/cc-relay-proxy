@@ -297,6 +297,15 @@ func TestRunWithZeroIntervalDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestAnalyzeExported(t *testing.T) {
+	// Verify that the exported Analyze() wrapper delegates to analyze().
+	pool := makeTestPool()
+	l, cleanup := makeTestLogger(t)
+	defer cleanup()
+	tu := New(pool, l, time.Hour)
+	tu.Analyze() // must not panic; exits early (< 100 events)
+}
+
 func TestRunTickerFires(t *testing.T) {
 	// Run with a 1ms interval lets the ticker fire before ctx is cancelled.
 	// analyze() exits early (< 100 events) but the ticker branch is covered.
