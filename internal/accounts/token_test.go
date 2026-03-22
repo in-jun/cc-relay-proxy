@@ -12,38 +12,53 @@ func TestTokenEnsureRefreshes(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
+		// Verify the request body has the correct grant_type
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		if body["grant_type"] != "refresh_token" {
+			t.Errorf("expected grant_type=refresh_token, got %q", body["grant_type"])
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"access_token":  "tok_" + time.Now().Format("150405"),
-			"refresh_token": "rt_new",
+			"access_token":  "new_access_token",
+			"refresh_token": "new_refresh_token",
 			"expires_in":    3600,
 		})
 	}))
 	defer srv.Close()
 
-	// Override the token URL for the test
-	origURL := TokenURL
-	_ = origURL // keep reference
+	// Point the token refresher at our fake server
+	orig := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = orig }()
 
 	tok := newToken("rt_initial")
-
-	// Verify that an empty token is correctly identified as needing refresh
-	if tok.accessToken != "" {
-		t.Error("new token should have empty access token")
+	ctx := t.Context()
+	got, err := tok.Ensure(ctx)
+	if err != nil {
+		t.Fatalf("Ensure returned error: %v", err)
 	}
-
-	// Set a pre-expired token to simulate needing refresh
-	tok.mu.Lock()
-	tok.accessToken = "old_tok"
-	tok.expiresAt = time.Now().Add(-1 * time.Minute) // expired
-	tok.mu.Unlock()
-
-	if tok.ExpiresIn() != "expired" {
-		t.Errorf("expected expired, got %s", tok.ExpiresIn())
+	if got != "new_access_token" {
+		t.Errorf("want new_access_token, got %q", got)
 	}
-
-	_ = srv
-	_ = calls
+	if calls != 1 {
+		t.Errorf("want 1 refresh call, got %d", calls)
+	}
+	// Verify RTR: new refresh token stored
+	tok.mu.RLock()
+	rt := tok.refreshToken
+	tok.mu.RUnlock()
+	if rt != "new_refresh_token" {
+		t.Errorf("RTR: want new_refresh_token stored, got %q", rt)
+	}
+	// Second call should not refresh (token still valid)
+	_, err = tok.Ensure(ctx)
+	if err != nil {
+		t.Fatalf("second Ensure returned error: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("second Ensure should use cached token, got %d calls", calls)
+	}
 }
 
 func TestTokenRTR(t *testing.T) {

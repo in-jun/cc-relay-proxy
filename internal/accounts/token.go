@@ -22,6 +22,9 @@ const (
 	refreshMaxRetries  = 3
 )
 
+// tokenEndpoint is the URL used by refresh(). Overridable in tests.
+var tokenEndpoint = TokenURL
+
 // RefreshCallback is called after a successful token refresh.
 // Used by the pool to emit token_refreshed log events.
 type RefreshCallback func(expiresInMins int)
@@ -114,7 +117,7 @@ func (t *Token) refresh(ctx context.Context) (string, error) {
 	rctx, cancel := context.WithTimeout(ctx, refreshTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(rctx, http.MethodPost, TokenURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, tokenEndpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("token refresh: build request: %w", err)
 	}
