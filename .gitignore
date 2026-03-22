@@ -2,8 +2,8 @@
 .claude/
 
 # Build output
-cc-relay-proxy
-cc-relay-proxy.exe
+/cc-relay-proxy
+/cc-relay-proxy.exe
 
 # Runtime state (contain tokens/logs — never commit)
 logs/
