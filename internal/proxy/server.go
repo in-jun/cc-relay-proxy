@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,14 +23,34 @@ import (
 
 var debugMode = os.Getenv("CC_LOG_LEVEL") == "debug"
 
-// upstreamClient is a shared HTTP client tuned for reverse-proxy use:
-// larger connection pool so keep-alive connections are reused across concurrent
-// requests without waiting for a new TLS handshake on every call.
+// upstreamClient is a shared HTTP client tuned for reverse-proxy use.
+// Key design choices:
+//   - ForceAttemptHTTP2 preserves HTTP/2 even with a custom DialContext
+//   - KeepAlive on the dialer maintains long-lived TCP connections to the API
+//   - Large idle pool (single upstream host) avoids TLS handshake on each request
+//   - TLSHandshakeTimeout prevents indefinite hangs on bad connections
 var upstreamClient = &http.Client{
 	Transport: &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 100, // single upstream host — keep many connections warm
 		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		ForceAttemptHTTP2:   true, // required when DialContext is set
+		DialContext: (&net.Dialer{
+			Timeout:   15 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	},
+}
+
+// ssePool is a pool of 32KB byte slices for SSE forwarding.
+// Reusing buffers reduces allocations and GC pressure during streaming.
+const sseBufSize = 32 * 1024
+
+var ssePool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, sseBufSize)
+		return &buf
 	},
 }
 
@@ -244,7 +266,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 		if isSSE(resp) {
 			flusher, canFlush := w.(http.Flusher)
-			buf := make([]byte, 4096)
+			bufPtr := ssePool.Get().(*[]byte)
+			buf := *bufPtr
 			for {
 				n, readErr := resp.Body.Read(buf)
 				if n > 0 {
@@ -257,6 +280,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
+			ssePool.Put(bufPtr)
 		} else {
 			io.Copy(w, resp.Body)
 		}
