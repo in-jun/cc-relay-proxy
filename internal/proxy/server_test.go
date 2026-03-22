@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,15 @@ func newTestLogger(t *testing.T) *logger.Logger {
 	l, _ := logger.New(f.Name())
 	t.Cleanup(func() { l.Close() })
 	return l
+}
+
+func newSeededTestPool(t *testing.T) *accounts.Pool {
+	t.Helper()
+	accts, _ := accounts.ParseAccounts(`[
+		{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999},
+		{"name":"a2","refreshToken":"rt2","accessToken":"tok2","expiresAt":9999999999999}
+	]`)
+	return accounts.NewPool(accts)
 }
 
 func TestFormatDuration(t *testing.T) {
@@ -429,4 +439,71 @@ func Test429WithNoRateLimitHeadersMarkesRejected(t *testing.T) {
 	}
 	_ = srv
 	_ = upstream
+}
+
+// errReader is an io.Reader that immediately returns an error.
+type errReader struct{ err error }
+
+func (e errReader) Read(p []byte) (int, error) { return 0, e.err }
+
+func TestProxyBodyReadError(t *testing.T) {
+	// A request body that errors on read → proxy should return 502.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	pool := newSeededTestPool(t)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	pr, pw := io.Pipe()
+	pw.CloseWithError(io.ErrUnexpectedEOF) // reader will return error on first Read
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", pr)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("want 502 on body read error, got %d", w.Code)
+	}
+}
+
+func TestProxy429AllRejectedWaitTooLong(t *testing.T) {
+	// All accounts rejected, soonest reset far in future (> ProxyHoldMax).
+	// Proxy must forward the 429 immediately rather than waiting.
+	farFuture := time.Now().Add(2 * time.Hour) // well beyond ProxyHoldMax (9m50s)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("anthropic-ratelimit-unified-status", "rejected")
+		w.Header().Set("anthropic-ratelimit-unified-5h-utilization", "1.0")
+		w.Header().Set("anthropic-ratelimit-unified-5h-reset", "9999999999")
+		w.Header().Set("anthropic-ratelimit-unified-7d-utilization", "0.95")
+		w.Header().Set("anthropic-ratelimit-unified-7d-reset", "9999999999")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"type":"rate_limit_error"}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newSeededTestPool(t)
+	// Pre-seed both accounts as rejected with far-future reset
+	pool.UpdateRateLimit("a1", accounts.RateLimit{
+		Status: "rejected", FiveHourUtil: 1.0, FiveHourReset: farFuture,
+	})
+	pool.UpdateRateLimit("a2", accounts.RateLimit{
+		Status: "rejected", FiveHourUtil: 1.0, FiveHourReset: farFuture,
+	})
+
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("want 429 forwarded when all rejected and wait too long, got %d", w.Code)
+	}
 }

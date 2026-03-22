@@ -222,6 +222,48 @@ func TestExpiresAt(t *testing.T) {
 	}
 }
 
+func TestRefreshBadJSONResponse(t *testing.T) {
+	// Server returns 200 OK but body is not valid JSON → Ensure must return error.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`not-valid-json`))
+	}))
+	defer srv.Close()
+
+	orig := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = orig }()
+
+	tok := newToken("rt")
+	_, err := tok.Ensure(context.Background())
+	if err == nil {
+		t.Fatal("expected error for bad JSON response")
+	}
+}
+
+func TestRefreshEmptyAccessToken(t *testing.T) {
+	// Server returns 200 with valid JSON but empty access_token → Ensure must return error.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	orig := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = orig }()
+
+	tok := newToken("rt")
+	_, err := tok.Ensure(context.Background())
+	if err == nil {
+		t.Fatal("expected error for empty access_token")
+	}
+}
+
 func TestExpiresIn(t *testing.T) {
 	tok := &Token{}
 	if s := tok.ExpiresIn(); s != "not refreshed" {
