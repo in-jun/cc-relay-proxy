@@ -37,6 +37,10 @@ func SetTokenEndpoint(url string) string {
 // Used by the pool to emit token_refreshed log events.
 type RefreshCallback func(expiresInMins int)
 
+// RotateCallback is called after a successful token refresh with the new
+// credentials. Used to persist rotated tokens so restarts don't lose them.
+type RotateCallback func(refreshToken, accessToken string, expiresAt time.Time)
+
 // Token holds an account's current OAuth credentials.
 type Token struct {
 	mu           sync.RWMutex
@@ -44,6 +48,7 @@ type Token struct {
 	refreshToken string
 	expiresAt    time.Time
 	onRefresh    RefreshCallback // optional; called after each successful refresh
+	onRotate     RotateCallback  // optional; called after each successful refresh with new credentials
 }
 
 // newToken creates a Token seeded with a refresh token only.
@@ -56,6 +61,14 @@ func newToken(refreshToken string) *Token {
 func (t *Token) SetRefreshCallback(cb RefreshCallback) {
 	t.mu.Lock()
 	t.onRefresh = cb
+	t.mu.Unlock()
+}
+
+// SetRotateCallback attaches a callback invoked after each successful token refresh
+// with the new credentials (refreshToken, accessToken, expiresAt).
+func (t *Token) SetRotateCallback(cb RotateCallback) {
+	t.mu.Lock()
+	t.onRotate = cb
 	t.mu.Unlock()
 }
 
@@ -166,6 +179,9 @@ func (t *Token) refresh(ctx context.Context) (string, error) {
 
 	if t.onRefresh != nil {
 		t.onRefresh(result.ExpiresIn / 60)
+	}
+	if t.onRotate != nil {
+		t.onRotate(t.refreshToken, t.accessToken, t.expiresAt)
 	}
 
 	return t.accessToken, nil

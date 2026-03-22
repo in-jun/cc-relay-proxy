@@ -25,12 +25,6 @@ func main() {
 
 // run initialises and starts the proxy. It blocks until a signal or server error.
 func run() error {
-	// Parse configuration from environment
-	ccAccounts := os.Getenv("CC_ACCOUNTS")
-	if ccAccounts == "" {
-		return fmt.Errorf("CC_ACCOUNTS is required (JSON array of {name, refreshToken[, accessToken, expiresAt]})")
-	}
-
 	port := envOrDefault("CC_PROXY_PORT", "9999")
 	logPath := envOrDefault("CC_LOG_PATH", "logs/proxy.log")
 
@@ -48,10 +42,23 @@ func run() error {
 	}
 	defer l.Close()
 
-	// Parse accounts
-	accts, err := accounts.ParseAccounts(ccAccounts)
-	if err != nil {
-		return fmt.Errorf("accounts: %w", err)
+	// Parse accounts — file takes precedence over env var
+	accountsFile := os.Getenv("CC_ACCOUNTS_FILE")
+	var accts []*accounts.Account
+	if accountsFile != "" {
+		accts, err = accounts.ParseAccountsFile(accountsFile)
+		if err != nil {
+			return fmt.Errorf("accounts file: %w", err)
+		}
+	} else {
+		ccAccounts := os.Getenv("CC_ACCOUNTS")
+		if ccAccounts == "" {
+			return fmt.Errorf("CC_ACCOUNTS or CC_ACCOUNTS_FILE is required")
+		}
+		accts, err = accounts.ParseAccounts(ccAccounts)
+		if err != nil {
+			return fmt.Errorf("accounts: %w", err)
+		}
 	}
 
 	pool := accounts.NewPool(accts)
@@ -72,6 +79,11 @@ func run() error {
 	pool.SetRefreshCallback(func(name string, expiresInMins int) {
 		l.Log("token_refreshed", name, map[string]any{"expiresInMins": expiresInMins})
 	})
+
+	// Persist rotated tokens back to the accounts file so restarts don't lose them
+	if accountsFile != "" {
+		pool.WatchRotations(accountsFile)
+	}
 
 	log.Printf("[cc-relay-proxy] starting on :%s with %d account(s)", port, len(accts))
 
