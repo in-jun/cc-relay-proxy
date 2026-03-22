@@ -222,6 +222,28 @@ func TestExpiresAt(t *testing.T) {
 	}
 }
 
+func TestEnsureContextCancelledDuringRetryWait(t *testing.T) {
+	// Server returns 503 (transient) → Ensure waits 1s before retry.
+	// Context is cancelled at 200ms → ctx.Done() fires during the wait.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"service_unavailable"}`))
+	}))
+	defer srv.Close()
+
+	orig := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = orig }()
+
+	tok := newToken("rt")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err := tok.Ensure(ctx)
+	if err == nil {
+		t.Fatal("expected error when context cancelled during retry wait")
+	}
+}
+
 func TestRefreshBadJSONResponse(t *testing.T) {
 	// Server returns 200 OK but body is not valid JSON → Ensure must return error.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
