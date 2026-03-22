@@ -795,6 +795,37 @@ func TestCheckAndPingResets(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
+func TestCheckAndPingResetsContinuePaths(t *testing.T) {
+	// Exercises the two early-continue paths in checkAndPingResets:
+	//   1. Status != "rejected"  → skip (first continue)
+	//   2. Status == "rejected" but reset is in the future → skip (second continue)
+	accts, _ := accounts.ParseAccounts(`[
+		{"name":"allowed","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999},
+		{"name":"futureReset","refreshToken":"rt2","accessToken":"tok2","expiresAt":9999999999999}
+	]`)
+	pool := accounts.NewPool(accts)
+
+	// Account "allowed": Status stays "allowed" (default) → first continue fires.
+	// Account "futureReset": Status="rejected" but reset is 10 minutes away → second continue.
+	pool.UpdateRateLimit("futureReset", accounts.RateLimit{
+		Status:        "rejected",
+		FiveHourUtil:  1.0,
+		FiveHourReset: time.Now().Add(10 * time.Minute),
+	})
+
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	p := NewPinger(pool, l, srv)
+
+	scheduled := map[string]time.Time{}
+	p.checkAndPingResets(context.Background(), scheduled)
+
+	// Neither account should be added: both hit a continue before the scheduled update.
+	if len(scheduled) != 0 {
+		t.Errorf("scheduled should be empty, got %v", scheduled)
+	}
+}
+
 func TestProxyLoopExhausted502(t *testing.T) {
 	// Pool with 1 account; upstream always returns 429 with rejected status
 	// and a reset 2s in the future. maxAttempts=3 (1+2). Each iteration holds
