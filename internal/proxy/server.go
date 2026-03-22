@@ -49,9 +49,15 @@ type Server struct {
 	bgCtx   context.Context // long-lived context for background work (pings etc.)
 }
 
-// New creates a Server.
+// New creates a Server targeting the real Anthropic API.
 func New(pool *accounts.Pool, l *logger.Logger) *Server {
-	target, _ := url.Parse(AnthropicTarget)
+	return NewWithTarget(pool, l, AnthropicTarget)
+}
+
+// NewWithTarget creates a Server targeting the given base URL.
+// Primarily used in tests to point at a fake upstream.
+func NewWithTarget(pool *accounts.Pool, l *logger.Logger, targetURL string) *Server {
+	target, _ := url.Parse(targetURL)
 	s := &Server{
 		pool:   pool,
 		log:    l,
