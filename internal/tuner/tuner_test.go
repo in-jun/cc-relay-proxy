@@ -166,6 +166,54 @@ func TestAnalyzeRecoveryWeighting(t *testing.T) {
 	}
 }
 
+func TestTunerAccessors(t *testing.T) {
+	pool := makeTestPool()
+	l, cleanup := makeTestLogger(t)
+	defer cleanup()
+
+	tu := New(pool, l, 5*time.Minute)
+
+	if tu.Interval() != 5*time.Minute {
+		t.Errorf("Interval: want 5m, got %v", tu.Interval())
+	}
+	if !tu.LastTuned().IsZero() {
+		t.Error("LastTuned should be zero before first tune")
+	}
+	hist := tu.History()
+	if len(hist) != 0 {
+		t.Errorf("History should be empty initially, got %d entries", len(hist))
+	}
+}
+
+func TestTunerHistoryRecorded(t *testing.T) {
+	pool := makeTestPool()
+	l, cleanup := makeTestLogger(t)
+	defer cleanup()
+
+	tu := New(pool, l, time.Hour)
+
+	// Inject enough events to trigger a parameter change (high 429 rate)
+	for i := 0; i < 110; i++ {
+		if i < 30 {
+			l.Log("429_received", "a1", map[string]any{"action": "switch", "fiveHour": 0.9})
+		} else {
+			l.Log("request", "a1", map[string]any{"method": "POST"})
+		}
+	}
+	tu.analyze()
+
+	if tu.LastTuned().IsZero() {
+		t.Error("LastTuned should be set after a parameter change")
+	}
+	hist := tu.History()
+	if len(hist) == 0 {
+		t.Error("History should contain at least one entry after tuning")
+	}
+	if hist[0].Reason == "" {
+		t.Error("TuneHistory entry should have a non-empty reason")
+	}
+}
+
 func TestClamp(t *testing.T) {
 	if clamp(1.5, 0, 1) != 1 {
 		t.Error("clamp max failed")

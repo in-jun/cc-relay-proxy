@@ -162,6 +162,101 @@ func TestProxySwitchesOn429(t *testing.T) {
 	}
 }
 
+func TestFormatAgo(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{30 * time.Second, "just now"},
+		{5 * time.Minute, "5m ago"},
+		{90 * time.Minute, "1h ago"},
+		{3*time.Hour + 15*time.Minute, "3h ago"},
+	}
+	for _, tt := range tests {
+		got := formatAgo(tt.d)
+		if got != tt.want {
+			t.Errorf("formatAgo(%v) = %q, want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
+func TestMaxInt(t *testing.T) {
+	if maxInt(3, 5) != 5 {
+		t.Error("maxInt(3,5) should be 5")
+	}
+	if maxInt(7, 2) != 7 {
+		t.Error("maxInt(7,2) should be 7")
+	}
+	if maxInt(4, 4) != 4 {
+		t.Error("maxInt(4,4) should be 4")
+	}
+}
+
+func TestServerHandlerAndPinger(t *testing.T) {
+	pool := newTestPool()
+	l := newTestLogger(t)
+	srv := New(pool, l)
+
+	h := srv.Handler()
+	if h == nil {
+		t.Error("Handler() should return non-nil")
+	}
+	p := srv.Pinger()
+	if p == nil {
+		t.Error("Pinger() should return non-nil")
+	}
+}
+
+func TestPingerAccessorsNoTuner(t *testing.T) {
+	pool := newTestPool()
+	l := newTestLogger(t)
+	srv := New(pool, l)
+	p := srv.Pinger()
+
+	// No tuner attached — test nil-tuner paths
+	hist := p.TuneHistory()
+	if hist == nil {
+		t.Error("TuneHistory with no tuner should return non-nil (empty slice)")
+	}
+	if p.TuneInterval() != 0 {
+		t.Errorf("TuneInterval with no tuner should be 0, got %v", p.TuneInterval())
+	}
+	if p.LastTuned() != "never" {
+		t.Errorf("LastTuned with no tuner should be 'never', got %s", p.LastTuned())
+	}
+}
+
+func TestFormatAgoSimple(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{10 * time.Second, "just now"},
+		{3 * time.Minute, "3m ago"},
+		{2*time.Hour + 15*time.Minute, "2h ago"},
+	}
+	for _, tt := range tests {
+		got := formatAgoSimple(tt.d)
+		if got != tt.want {
+			t.Errorf("formatAgoSimple(%v) = %q, want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
+func TestStatusEndpointMethodNotAllowed(t *testing.T) {
+	pool := newTestPool()
+	l := newTestLogger(t)
+	srv := New(pool, l)
+
+	req := httptest.NewRequest(http.MethodPost, "/status", nil)
+	w := httptest.NewRecorder()
+	srv.handleStatus(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("want 405, got %d", w.Code)
+	}
+}
+
 func Test429WithNoRateLimitHeadersMarkesRejected(t *testing.T) {
 	// Upstream returns 429 with no rate-limit headers
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
