@@ -209,6 +209,27 @@ func TestNewMkdirFails(t *testing.T) {
 	}
 }
 
+func TestLogNonSerializableData(t *testing.T) {
+	// json.Marshal fails on non-serializable values (e.g. channels).
+	// Log() must silently drop the entry without panicking.
+	f, _ := os.CreateTemp("", "proxy-log-*.jsonl")
+	f.Close()
+	path := f.Name()
+	defer os.Remove(path)
+
+	l, _ := New(path)
+	defer l.Close()
+
+	// Pass a channel — not JSON-serializable; json.Marshal returns an error.
+	l.Log("test", "acct", map[string]any{"ch": make(chan int)})
+
+	// No entries should be written (json.Marshal failed silently).
+	lines := l.ReadLines()
+	if len(lines) != 0 {
+		t.Errorf("expected 0 lines after marshal failure, got %d", len(lines))
+	}
+}
+
 func TestNewOpenFileFails(t *testing.T) {
 	// New() returns an error when OpenFile fails (read-only directory).
 	dir, err := os.MkdirTemp("", "logger-readonly-*")

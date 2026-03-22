@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -410,5 +411,67 @@ func TestRefreshBodyReadError(t *testing.T) {
 	_, err := tok.Ensure(ctx)
 	if err == nil {
 		t.Fatal("expected error when response body is truncated")
+	}
+}
+
+func TestEnsureDoubleCheckOnWriteLock(t *testing.T) {
+	// Two goroutines race to refresh the same expired token.
+	// The write lock is exclusive, so only one goroutine actually calls the server.
+	// The second goroutine enters the slow path, blocks on the write lock, then
+	// hits the double-check (token already valid) and returns without another refresh.
+	calls := 0
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		// Hold the connection briefly so the second goroutine arrives at the write lock
+		// before the first finishes and sets the token.
+		time.Sleep(60 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "shared_token",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	orig := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = orig }()
+
+	tok := newToken("rt") // starts with no access token → both goroutines fail fast path
+
+	start := make(chan struct{})
+	type result struct {
+		tok string
+		err error
+	}
+	ch := make(chan result, 2)
+
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			t, err := tok.Ensure(context.Background())
+			ch <- result{t, err}
+		}()
+	}
+	close(start) // release both goroutines simultaneously
+
+	for i := 0; i < 2; i++ {
+		r := <-ch
+		if r.err != nil {
+			t.Errorf("Ensure error: %v", r.err)
+		}
+		if r.tok != "shared_token" {
+			t.Errorf("want shared_token, got %q", r.tok)
+		}
+	}
+	// Exactly one server call: the second goroutine hit the double-check.
+	mu.Lock()
+	c := calls
+	mu.Unlock()
+	if c != 1 {
+		t.Errorf("want exactly 1 refresh call (double-check fires), got %d", c)
 	}
 }
