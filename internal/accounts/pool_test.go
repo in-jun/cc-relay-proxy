@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,6 +94,47 @@ func TestParseRateLimitHeaders(t *testing.T) {
 	}
 	if rl.SevenDayUtil != 0.21 {
 		t.Errorf("want 0.21, got %f", rl.SevenDayUtil)
+	}
+}
+
+func TestSelectBestCautionFallback(t *testing.T) {
+	// All accounts over threshold (caution) but none rejected — Priority 3.
+	// Should switch to the account with the lowest 5h utilization.
+	p := makePool(3)
+	threshold := p.Params().SwitchThreshold5h // 0.85 for N=3
+
+	// All accounts over threshold, none rejected
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.05} // active, highest
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.02} // lowest
+	p.accounts[2].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.04}
+
+	name, prevName, switched, reason := p.SelectBest()
+	if !switched {
+		t.Error("should switch to caution-fallback account")
+	}
+	if name != "acct2" {
+		t.Errorf("caution fallback: want acct2 (lowest 5h), got %s", name)
+	}
+	if prevName != "acct1" {
+		t.Errorf("prevName should be acct1, got %s", prevName)
+	}
+	if !strings.Contains(reason, "caution-fallback") {
+		t.Errorf("reason should contain 'caution-fallback', got %q", reason)
+	}
+}
+
+func TestSelectBestCautionFallbackStaysWhenCurrentIsBest(t *testing.T) {
+	// All accounts over threshold, current has lowest 5h — should stay.
+	p := makePool(3)
+	threshold := p.Params().SwitchThreshold5h
+
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.01} // active, lowest
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.05}
+	p.accounts[2].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.08}
+
+	_, _, switched, _ := p.SelectBest()
+	if switched {
+		t.Error("should not switch when current has lowest 5h in caution-fallback")
 	}
 }
 
