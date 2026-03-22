@@ -25,6 +25,19 @@ const (
 // tokenEndpoint is the URL used by refresh(). Overridable in tests.
 var tokenEndpoint = TokenURL
 
+// refreshHTTPClient is a dedicated client for OAuth token refresh calls.
+// Using a separate client (rather than http.DefaultClient) keeps connections
+// to platform.claude.com alive between refreshes, eliminating the ~300-400ms
+// TLS handshake overhead that would otherwise hit every refresh operation.
+var refreshHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConnsPerHost: 5,
+		IdleConnTimeout:     120 * time.Second,
+		ForceAttemptHTTP2:   true,
+	},
+	Timeout: refreshTimeout + 5*time.Second,
+}
+
 // SetTokenEndpoint overrides the OAuth token endpoint. Returns the previous value.
 // For use in tests only.
 func SetTokenEndpoint(url string) string {
@@ -144,7 +157,7 @@ func (t *Token) refresh(ctx context.Context) (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := refreshHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("token refresh: http: %w", err)
 	}
