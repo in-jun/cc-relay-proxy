@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -33,7 +34,7 @@ func TestTokenEnsureRefreshes(t *testing.T) {
 	defer func() { tokenEndpoint = orig }()
 
 	tok := newToken("rt_initial")
-	ctx := t.Context()
+	ctx := context.Background()
 	got, err := tok.Ensure(ctx)
 	if err != nil {
 		t.Fatalf("Ensure returned error: %v", err)
