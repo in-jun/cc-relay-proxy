@@ -321,3 +321,64 @@ func TestSetTokenEndpoint(t *testing.T) {
 		t.Errorf("SetTokenEndpoint should update tokenEndpoint, got %s", tokenEndpoint)
 	}
 }
+
+func TestRefreshHTTPClientError(t *testing.T) {
+	// Server closes the connection immediately after accepting, causing
+	// http.DefaultClient.Do to return an error.
+	// Covers refresh's "token refresh: http: ..." error path.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("hijack not supported")
+			return
+		}
+		conn, _, _ := hj.Hijack()
+		conn.Close() // close without sending any response
+	}))
+	defer srv.Close()
+
+	prev := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = prev }()
+
+	// Use a short context so we don't wait through the full retry delay.
+	// The http error is recorded on attempt 0; ctx expires before attempt 1.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	tok := newToken("rt")
+	_, err := tok.Ensure(ctx)
+	if err == nil {
+		t.Fatal("expected error when server closes connection immediately")
+	}
+}
+
+func TestRefreshBodyReadError(t *testing.T) {
+	// Server sends headers with Content-Length then closes the connection
+	// before sending the full body, causing io.ReadAll to return an error.
+	// Covers refresh's "token refresh: read body: ..." error path.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("hijack not supported")
+			return
+		}
+		conn, _, _ := hj.Hijack()
+		// Send valid HTTP response headers with Content-Length but truncate body.
+		conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{partial"))
+		conn.Close() // close before body is fully sent
+	}))
+	defer srv.Close()
+
+	prev := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = prev }()
+
+	// Use a short context so we don't wait through the full retry delay.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	tok := newToken("rt")
+	_, err := tok.Ensure(ctx)
+	if err == nil {
+		t.Fatal("expected error when response body is truncated")
+	}
+}
