@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -53,6 +56,68 @@ type Pool struct {
 	accounts []*Account
 	active   int // index into accounts
 	params   Params
+}
+
+// ParseAccountsFile reads and parses a JSON accounts file.
+func ParseAccountsFile(path string) ([]*Account, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read accounts file: %w", err)
+	}
+	return ParseAccounts(string(data))
+}
+
+// PersistAccounts atomically writes the current token state of all accounts
+// back to path so that restarting the proxy doesn't lose rotated refresh tokens.
+func (p *Pool) PersistAccounts(path string) error {
+	p.mu.RLock()
+	cfgs := make([]AccountConfig, len(p.accounts))
+	for i, a := range p.accounts {
+		a.mu.RLock()
+		rt := a.token.refreshToken
+		at := a.token.accessToken
+		exp := a.token.expiresAt
+		a.mu.RUnlock()
+		cfgs[i] = AccountConfig{
+			Name:         a.Name,
+			RefreshToken: rt,
+			AccessToken:  at,
+			ExpiresAt:    exp.UnixMilli(),
+		}
+	}
+	p.mu.RUnlock()
+
+	data, err := json.MarshalIndent(cfgs, "", "  ")
+	if err != nil {
+		return err
+	}
+	// Atomic write: temp file → rename
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".cc-accounts-*.json")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	tmp.Close()
+	return os.Rename(tmp.Name(), path)
+}
+
+// WatchRotations registers a rotate callback on every account token so that
+// whenever a refresh rotates the credentials, they are persisted to path.
+func (p *Pool) WatchRotations(path string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, a := range p.accounts {
+		a := a // capture
+		a.token.SetRotateCallback(func(_, _ string, _ time.Time) {
+			if err := p.PersistAccounts(path); err != nil {
+				log.Printf("[accounts] failed to persist rotated tokens: %v", err)
+			}
+		})
+	}
 }
 
 // ParseAccounts parses a JSON array from CC_ACCOUNTS.
