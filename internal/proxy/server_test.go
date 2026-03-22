@@ -544,6 +544,32 @@ func TestProxyHoldContextCancelled(t *testing.T) {
 	// No response code assertion — handler returns without writing when ctx is done.
 }
 
+func TestSendRequestDebugMode(t *testing.T) {
+	// Temporarily enable debug logging to cover the debugMode branch in sendRequest.
+	old := debugMode
+	debugMode = true
+	defer func() { debugMode = old }()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"type":"message"}`))
+	}))
+	defer upstream.Close()
+
+	pool := newSeededTestPool(t)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200, got %d", w.Code)
+	}
+}
+
 func TestStatusEndpointWithLastSeenAndTuner(t *testing.T) {
 	// Covers:
 	//   - lastSeenStr = formatAgo(...)  (LastSeen is non-zero after UpdateRateLimit)
@@ -570,5 +596,30 @@ func TestStatusEndpointWithLastSeenAndTuner(t *testing.T) {
 	}
 	if !strings.Contains(body, "ago") && !strings.Contains(body, "just now") {
 		t.Errorf("expected lastSeen to contain ago/just now, got: %s", body)
+	}
+}
+
+func TestPingerLastTunedAfterTune(t *testing.T) {
+	// Covers the formatAgoSimple branch in pinger.LastTuned() when LastTuned is non-zero.
+	pool := newTestPool()
+	l := newTestLogger(t)
+
+	// Inject enough events to trigger a parameter change (high 429 rate)
+	for i := 0; i < 30; i++ {
+		l.Log("429_received", "a1", map[string]any{"action": "switch", "fiveHour": 0.9})
+	}
+	for i := 0; i < 80; i++ {
+		l.Log("request", "a1", map[string]any{"method": "POST"})
+	}
+
+	tu := tuner.New(pool, l, time.Hour)
+	tu.Analyze() // triggers param change (high 429 rate), sets LastTuned to now
+	srv := New(pool, l)
+	srv.pinger.SetTuner(tu)
+
+	// LastTuned should now return something like "just now" or "Xm ago"
+	result := srv.pinger.LastTuned()
+	if result == "never" {
+		t.Errorf("LastTuned should not be 'never' after tuner ran, got %q", result)
 	}
 }
