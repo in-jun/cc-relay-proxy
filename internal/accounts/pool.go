@@ -105,6 +105,10 @@ func NewPool(accounts []*Account) *Pool {
 	}
 }
 
+// Len returns the number of accounts in the pool.
+// Unlike Accounts(), this does not allocate a snapshot slice.
+func (p *Pool) Len() int { return len(p.accounts) }
+
 // Params returns a copy of current params.
 func (p *Pool) Params() Params {
 	p.mu.RLock()

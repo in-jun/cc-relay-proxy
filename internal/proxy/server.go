@@ -109,7 +109,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		s.pinger.PingAfterSwitch(s.bgCtx, prevAccount)
 	}
 
-	maxAttempts := len(s.pool.Accounts()) + 2
+	maxAttempts := s.pool.Len() + 2
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		tok, name, err := s.pool.ActiveTokenWithName(r.Context())
 		if err != nil {
