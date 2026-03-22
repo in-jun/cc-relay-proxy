@@ -27,6 +27,7 @@ func main() {
 func run() error {
 	accountsFile := envOrDefault("CC_ACCOUNTS_FILE", "accounts.json")
 	port := envOrDefault("CC_PROXY_PORT", "9999")
+	bindAddr := envOrDefault("CC_PROXY_BIND", "127.0.0.1")
 	logPath := envOrDefault("CC_LOG_PATH", "logs/proxy.log")
 
 	tuneIntervalSec := 3600
@@ -56,7 +57,7 @@ func run() error {
 
 	l.Log("startup", "", map[string]any{
 		"numAccounts": len(accts),
-		"port":        port,
+		"listenAddr":  bindAddr + ":" + port,
 		"params": map[string]any{
 			"switchThreshold5h": params.SwitchThreshold5h,
 			"hardBlock7d":       params.HardBlock7d,
@@ -73,7 +74,8 @@ func run() error {
 	// Persist rotated tokens back to the accounts file so restarts don't lose them
 	pool.WatchRotations(accountsFile)
 
-	log.Printf("[cc-relay-proxy] starting on :%s with %d account(s)", port, len(accts))
+	listenAddr := bindAddr + ":" + port
+	log.Printf("[cc-relay-proxy] starting on %s with %d account(s)", listenAddr, len(accts))
 
 	// Build components
 	srv := proxy.New(pool, l)
@@ -89,7 +91,7 @@ func run() error {
 	go t.Run(ctx)
 
 	httpSrv := &http.Server{
-		Addr:         ":" + port,
+		Addr:         listenAddr,
 		Handler:      srv.Handler(),
 		ReadTimeout:  0, // streaming; no read timeout
 		WriteTimeout: 0, // streaming; no write timeout
@@ -110,7 +112,7 @@ func run() error {
 		cancel()
 	}()
 
-	addr := fmt.Sprintf("http://localhost:%s", port)
+	addr := fmt.Sprintf("http://%s", listenAddr)
 	log.Printf("[cc-relay-proxy] listening at %s — set ANTHROPIC_BASE_URL=%s", addr, addr)
 
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
