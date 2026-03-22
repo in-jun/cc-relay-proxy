@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -295,6 +296,28 @@ func TestFormatAgoSimple(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("formatAgoSimple(%v) = %q, want %q", tt.d, got, tt.want)
 		}
+	}
+}
+
+func TestProxyReturns502WhenContextCancelledBeforeRequest(t *testing.T) {
+	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999}]`)
+	pool := accounts.NewPool(accts)
+	l := newTestLogger(t)
+	// Point at a non-listening address so the connection fails
+	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+
+	// Pre-cancel the context so the HTTP call fails immediately
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	reqCtx, reqCancel := context.WithCancel(req.Context())
+	reqCancel()
+	req = req.WithContext(reqCtx)
+
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	// Either 502 (upstream error) or context cancelled path (empty body, no write)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("want 502 on upstream connection error, got %d", w.Code)
 	}
 }
 
