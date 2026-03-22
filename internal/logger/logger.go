@@ -89,20 +89,24 @@ func (l *Logger) Close() error {
 
 // ReadLines returns all log entries (from current + rotated file) as raw JSON objects.
 // Entries are sorted oldest-first. Used by the auto-tuner.
+//
+// The mutex is held only long enough to read raw bytes from disk; JSON parsing
+// happens outside the lock so log writes are not blocked during CPU-bound parsing.
 func (l *Logger) ReadLines() []map[string]any {
+	// Capture raw file contents under the lock, then parse outside it.
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	var result []map[string]any
+	var snapshots [][]byte
 	for _, p := range []string{l.path + ".1", l.path} {
 		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
+		if err == nil {
+			snapshots = append(snapshots, data)
 		}
-		dec := json.NewDecoder(
-			// reuse the bytes as a reader
-			newByteReader(data),
-		)
+	}
+	l.mu.Unlock()
+
+	var result []map[string]any
+	for _, data := range snapshots {
+		dec := json.NewDecoder(newByteReader(data))
 		for dec.More() {
 			var obj map[string]any
 			if err := dec.Decode(&obj); err != nil {
