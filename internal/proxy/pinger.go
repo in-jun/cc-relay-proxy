@@ -13,9 +13,13 @@ import (
 	"github.com/in-jun/cc-relay-proxy/internal/tuner"
 )
 
-const (
-	pingModel    = "claude-haiku-4-5-20251001"
-	pingInterval = 10 * time.Minute
+const pingModel = "claude-haiku-4-5-20251001"
+
+// pingInterval and resetCheckInterval are vars so tests can set them to short
+// durations without waiting 10 minutes or 30 seconds.
+var (
+	pingInterval       = 10 * time.Minute
+	resetCheckInterval = 30 * time.Second
 )
 
 var pingBody []byte
@@ -94,7 +98,7 @@ func (p *Pinger) StartupPing(ctx context.Context) {
 // Run starts the periodic ping loop and the reset-watcher.
 func (p *Pinger) Run(ctx context.Context) {
 	ticker := time.NewTicker(pingInterval)
-	resetTicker := time.NewTicker(30 * time.Second) // check reset times frequently
+	resetTicker := time.NewTicker(resetCheckInterval)
 	defer ticker.Stop()
 	defer resetTicker.Stop()
 
