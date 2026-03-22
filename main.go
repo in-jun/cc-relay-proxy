@@ -18,10 +18,17 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// run initialises and starts the proxy. It blocks until a signal or server error.
+func run() error {
 	// Parse configuration from environment
 	ccAccounts := os.Getenv("CC_ACCOUNTS")
 	if ccAccounts == "" {
-		log.Fatal("CC_ACCOUNTS is required (JSON array of {name, refreshToken[, accessToken, expiresAt]})")
+		return fmt.Errorf("CC_ACCOUNTS is required (JSON array of {name, refreshToken[, accessToken, expiresAt]})")
 	}
 
 	port := envOrDefault("CC_PROXY_PORT", "9999")
@@ -37,14 +44,14 @@ func main() {
 	// Initialize logger
 	l, err := logger.New(logPath)
 	if err != nil {
-		log.Fatalf("logger: %v", err)
+		return fmt.Errorf("logger: %w", err)
 	}
 	defer l.Close()
 
 	// Parse accounts
 	accts, err := accounts.ParseAccounts(ccAccounts)
 	if err != nil {
-		log.Fatalf("accounts: %v", err)
+		return fmt.Errorf("accounts: %w", err)
 	}
 
 	pool := accounts.NewPool(accts)
@@ -113,8 +120,9 @@ func main() {
 	log.Printf("[cc-relay-proxy] listening at %s — set ANTHROPIC_BASE_URL=%s", addr, addr)
 
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server: %v", err)
+		return fmt.Errorf("server: %w", err)
 	}
+	return nil
 }
 
 func envOrDefault(key, def string) string {
