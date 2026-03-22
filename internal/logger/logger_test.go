@@ -125,6 +125,42 @@ func TestReadLinesMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestRotateFailsGracefully(t *testing.T) {
+	// Cover the os.OpenFile error path in rotate() by:
+	// 1. Deleting the log file (so rename has nothing to move)
+	// 2. Making the directory read-only (so OpenFile can't CREATE the new file)
+	dir, err := os.MkdirTemp("", "logger-rotate-fail-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		os.Chmod(dir, 0o755) // restore before cleanup
+		os.RemoveAll(dir)
+	}()
+
+	path := dir + "/test.log"
+	l, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// Delete the log file while the fd is still open, then make dir read-only.
+	// rotate() will: Close (ok) → Rename (no-op, file gone) → OpenFile (fails: no CREATE in read-only dir).
+	os.Remove(path)
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set written counter past threshold to trigger rotate() on next Log call.
+	l.mu.Lock()
+	l.written = maxLogSize + 1
+	l.mu.Unlock()
+
+	// Log call triggers rotate(); OpenFile must fail → early return. No panic.
+	l.Log("test", "", nil)
+}
+
 func TestRotation(t *testing.T) {
 	f, _ := os.CreateTemp("", "proxy-log-*.jsonl")
 	f.Close()
