@@ -92,14 +92,19 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Select best account
+	prevAccount := s.pool.ActiveName()
 	accountName, switched, switchReason := s.pool.SelectBest()
 	if switched {
 		s.stats.TotalSwitches.Add(1)
 		rl := s.pool.RateLimitFor(accountName)
 		s.log.Log("account_switched", accountName, map[string]any{
+			"from":            prevAccount,
+			"to":              accountName,
 			"reason":          switchReason,
 			"fiveHour_before": rl.FiveHourUtil,
 		})
+		// Ping the previous account in background to measure its recovery speed
+		go s.pinger.PingAfterSwitch(r.Context(), prevAccount)
 	}
 
 	maxAttempts := len(s.pool.Accounts()) + 2
@@ -136,32 +141,36 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			s.stats.Total429.Add(1)
 
 			// Try another account
+			prev429Account := accountName
 			nextName, switched2, reason2 := s.pool.SelectBest()
 			if switched2 {
 				s.stats.TotalSwitches.Add(1)
 				s.log.Log("account_switched", nextName, map[string]any{
-					"from":   accountName,
+					"from":   prev429Account,
 					"to":     nextName,
 					"reason": reason2,
 				})
-				s.log.Log("429_received", accountName, map[string]any{
+				s.log.Log("429_received", prev429Account, map[string]any{
 					"action":   "switch",
 					"fiveHour": rl.FiveHourUtil,
 				})
+				// Ping previous account in background to measure recovery speed
+				go s.pinger.PingAfterSwitch(r.Context(), prev429Account)
 				accountName = nextName
 				continue
 			}
 
-			// All blocked: hold or forward
-			if s.pool.AllRejected() {
+			// No switch available — all accounts blocked or in caution
+			allRejected := s.pool.AllRejected()
+			if allRejected {
 				soonest := s.pool.SoonestReset()
 				waitDur := time.Until(soonest)
 				if waitDur > 0 && waitDur <= ProxyHoldMax {
+					s.log.Log("all_blocked", "", map[string]any{"reason": "all_rejected", "waitSec": waitDur.Seconds()})
 					s.log.Log("429_received", accountName, map[string]any{
 						"action":  "hold",
 						"waitSec": waitDur.Seconds(),
 					})
-					s.log.Log("all_blocked", "", map[string]any{"waitSec": waitDur.Seconds()})
 					select {
 					case <-time.After(waitDur):
 					case <-r.Context().Done():
@@ -169,6 +178,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 					}
 					continue
 				}
+				s.log.Log("all_blocked", "", map[string]any{"reason": "all_rejected_wait_too_long"})
+			} else {
+				s.log.Log("all_blocked", "", map[string]any{"reason": "all_in_caution"})
 			}
 
 			// Forward 429
@@ -176,7 +188,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				"action":   "forward",
 				"fiveHour": rl.FiveHourUtil,
 			})
-			s.log.Log("all_blocked", "", map[string]any{"action": "forward"})
 			copyHeaders(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 			w.Write(rawBody)
