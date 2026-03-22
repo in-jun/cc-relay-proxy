@@ -62,7 +62,11 @@ func (t *Tuner) History() []TuneHistory {
 }
 
 // Run starts the tuner loop, blocking until ctx is cancelled.
+// If the interval is zero or negative (disabled), Run returns immediately.
 func (t *Tuner) Run(ctx context.Context) {
+	if t.interval <= 0 {
+		return
+	}
 	ticker := time.NewTicker(t.interval)
 	defer ticker.Stop()
 	for {

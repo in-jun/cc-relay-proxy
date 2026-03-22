@@ -1,6 +1,7 @@
 package tuner
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -211,6 +212,26 @@ func TestTunerHistoryRecorded(t *testing.T) {
 	}
 	if hist[0].Reason == "" {
 		t.Error("TuneHistory entry should have a non-empty reason")
+	}
+}
+
+func TestRunWithZeroIntervalDoesNotPanic(t *testing.T) {
+	pool := makeTestPool()
+	l, cleanup := makeTestLogger(t)
+	defer cleanup()
+
+	// interval=0 means "disabled" — Run must return immediately, not panic.
+	tu := New(pool, l, 0)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tu.Run(context.Background())
+	}()
+	select {
+	case <-done:
+		// good
+	case <-time.After(time.Second):
+		t.Error("Run with interval=0 should return immediately, but it's still running after 1s")
 	}
 }
 
