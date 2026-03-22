@@ -238,6 +238,15 @@ func (s *Server) sendRequest(r *http.Request, bodyBuf []byte, tok string) (*http
 	}
 	outReq.Header.Set("Authorization", "Bearer "+tok)
 
+	// Debug: log the token prefix and oauth-beta header being sent upstream
+	tokPfx := tok
+	if len(tokPfx) > 20 {
+		tokPfx = tokPfx[:20] + "..."
+	}
+	log.Printf("[proxy] → %s %s | auth=Bearer %s | beta=%s",
+		r.Method, r.URL.Path, tokPfx,
+		outReq.Header.Get("anthropic-beta"))
+
 	resp, err := http.DefaultClient.Do(outReq)
 	if err != nil {
 		return nil, nil, err
@@ -263,6 +272,8 @@ func (s *Server) DoUpstreamRequest(ctx context.Context, tok, path string, body [
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
+	// OAuth tokens require this beta header — without it the API returns 401
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 	return http.DefaultClient.Do(req)
 }
 
