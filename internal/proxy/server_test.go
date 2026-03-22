@@ -10,6 +10,7 @@ import (
 
 	"github.com/in-jun/cc-relay-proxy/internal/accounts"
 	"github.com/in-jun/cc-relay-proxy/internal/logger"
+	"github.com/in-jun/cc-relay-proxy/internal/tuner"
 )
 
 func newTestPool() *accounts.Pool {
@@ -159,6 +160,60 @@ func TestProxySwitchesOn429(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Errorf("want at least 2 upstream calls (one 429, one success), got %d", calls)
+	}
+}
+
+func TestPingerSetTunerAndAccessors(t *testing.T) {
+	pool := newTestPool()
+	l := newTestLogger(t)
+	srv := New(pool, l)
+	p := srv.Pinger()
+
+	tu := tuner.New(pool, l, time.Hour)
+	p.SetTuner(tu)
+
+	if p.TuneInterval() != time.Hour {
+		t.Errorf("TuneInterval: want 1h, got %v", p.TuneInterval())
+	}
+	// Before any tune, LastTuned should say "never"
+	if p.LastTuned() != "never" {
+		t.Errorf("LastTuned before any tune: want 'never', got %s", p.LastTuned())
+	}
+	// TuneHistory should be empty initially
+	hist := p.TuneHistory()
+	if hist == nil {
+		t.Error("TuneHistory should be non-nil")
+	}
+}
+
+func TestProxyStreamsSSEResponse(t *testing.T) {
+	// Upstream that sends a text/event-stream response
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data: hello\n\ndata: world\n\n"))
+	}))
+	defer upstream.Close()
+
+	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999}]`)
+	pool := accounts.NewPool(accts)
+	l := newTestLogger(t)
+
+	srv := NewWithTarget(pool, l, upstream.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") {
+		t.Error("response should have SSE content type")
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "data: hello") {
+		t.Errorf("expected SSE data in body, got: %s", body)
 	}
 }
 
