@@ -165,12 +165,11 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		rl, hasRL := accounts.ParseRateLimitHeaders(resp.Header)
 		if hasRL {
 			s.pool.UpdateRateLimit(accountName, rl)
-			params := s.pool.Params()
 			s.log.Log("rate_limit_update", accountName, map[string]any{
 				"fiveHour":      rl.FiveHourUtil,
 				"sevenDay":      rl.SevenDayUtil,
 				"status":        rl.Status,
-				"water":         accounts.WaterScore(rl, params),
+				"water":         accounts.WaterScore(rl),
 				"5hResetInMins": int(time.Until(rl.FiveHourReset).Minutes()),
 				"7dResetInHrs":  int(time.Until(rl.SevenDayReset).Hours()),
 			})
@@ -248,7 +247,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				"latencyMs": time.Since(start).Milliseconds(),
 				"fiveHour":  fwdRL.FiveHourUtil,
 				"sevenDay":  fwdRL.SevenDayUtil,
-				"water":     accounts.WaterScore(fwdRL, s.pool.Params()),
+				"water":     accounts.WaterScore(fwdRL),
 			})
 			return
 		}
@@ -293,7 +292,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Body.Close()
 
-		// Include current rate-limit state in every request log for tuner analysis.
+		// Include current rate-limit state in every request log for analysis.
 		reqRL := s.pool.RateLimitFor(accountName)
 		s.log.Log("request", accountName, map[string]any{
 			"method":    r.Method,
@@ -302,7 +301,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"latencyMs": time.Since(start).Milliseconds(),
 			"fiveHour":  reqRL.FiveHourUtil,
 			"sevenDay":  reqRL.SevenDayUtil,
-			"water":     accounts.WaterScore(reqRL, s.pool.Params()),
+			"water":     accounts.WaterScore(reqRL),
 		})
 		return
 	}
@@ -388,7 +387,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	uptime := time.Since(s.stats.StartTime)
-	params := s.pool.Params()
 	acctSnaps := s.pool.Accounts()
 
 	type fiveHourInfo struct {
@@ -405,6 +403,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Name           string       `json:"name"`
 		IsActive       bool         `json:"isActive"`
 		Status         string       `json:"status"`
+		Water          float64      `json:"water"`
 		FiveHour       fiveHourInfo `json:"fiveHour"`
 		SevenDay       sevenDayInfo `json:"sevenDay"`
 		TokenExpiresIn string       `json:"tokenExpiresIn"`
@@ -424,6 +423,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			Name:     a.Name,
 			IsActive: a.IsActive,
 			Status:   rl.Status,
+			Water:    accounts.WaterScore(rl),
 			FiveHour: fiveHourInfo{
 				Utilization:  rl.FiveHourUtil,
 				Percent:      fmt.Sprintf("%.0f%%", rl.FiveHourUtil*100),
@@ -439,39 +439,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	type paramsStatus struct {
-		SwitchThreshold5h   float64 `json:"switchThreshold5h"`
-		HardBlock7d         float64 `json:"hardBlock7d"`
-		Weight5h            float64 `json:"weight5h"`
-		Weight7d            float64 `json:"weight7d"`
-		ProactiveHysteresis float64 `json:"proactiveHysteresis"`
-		TuneInterval        string  `json:"tuneInterval"`
-		LastTuned           string  `json:"lastTuned"`
-	}
-
-	ti := s.pinger.TuneInterval()
-	tuneIntervalStr := "disabled"
-	if ti > 0 {
-		tuneIntervalStr = ti.String()
-	}
-
 	status := map[string]any{
-		"active":        s.pool.ActiveName(),
-		"uptime":        formatDuration(uptime),
-		"totalRequests": s.stats.TotalRequests.Load(),
-		"totalSwitches": s.stats.TotalSwitches.Load(),
-		"total429":      s.stats.Total429.Load(),
-		"params": paramsStatus{
-			SwitchThreshold5h:   params.SwitchThreshold5h,
-			HardBlock7d:         params.HardBlock7d,
-			Weight5h:            params.Weight5h,
-			Weight7d:            params.Weight7d,
-			ProactiveHysteresis: params.ProactiveHysteresis,
-			TuneInterval:        tuneIntervalStr,
-			LastTuned:           s.pinger.LastTuned(),
-		},
-		"accounts":    accts,
-		"tuneHistory": s.pinger.TuneHistory(),
+		"active":               s.pool.ActiveName(),
+		"uptime":               formatDuration(uptime),
+		"totalRequests":        s.stats.TotalRequests.Load(),
+		"totalSwitches":        s.stats.TotalSwitches.Load(),
+		"total429":             s.stats.Total429.Load(),
+		"proactiveHysteresis":  accounts.ProactiveHysteresis,
+		"accounts":             accts,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

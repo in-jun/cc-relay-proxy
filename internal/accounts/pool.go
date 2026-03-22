@@ -20,18 +20,18 @@ import (
 type AccountConfig struct {
 	Name         string `json:"name"`
 	RefreshToken string `json:"refreshToken"`
-	AccessToken  string `json:"accessToken,omitempty"`  // optional seed
-	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // unix ms, optional
+	AccessToken  string `json:"accessToken,omitempty"` // optional seed
+	ExpiresAt    int64  `json:"expiresAt,omitempty"`   // unix ms, optional
 }
 
 // RateLimit holds the last-known rate limit state for an account.
 type RateLimit struct {
-	Status          string  // "allowed" | "allowed_warning" | "rejected"
-	FiveHourUtil    float64 // 0.0–1.0
-	FiveHourReset   time.Time
-	SevenDayUtil    float64
-	SevenDayReset   time.Time
-	LastSeen        time.Time
+	Status        string  // "allowed" | "allowed_warning" | "rejected"
+	FiveHourUtil  float64 // 0.0–1.0
+	FiveHourReset time.Time
+	SevenDayUtil  float64
+	SevenDayReset time.Time
+	LastSeen      time.Time
 }
 
 // Account is a single Anthropic account with its token and rate limit state.
@@ -42,21 +42,17 @@ type Account struct {
 	rateLimit RateLimit
 }
 
-// Params holds tunable algorithm parameters.
-type Params struct {
-	SwitchThreshold5h   float64
-	HardBlock7d         float64
-	Weight5h            float64 // retained for logging/tuning history; not used in selection
-	Weight7d            float64 // retained for logging/tuning history; not used in selection
-	ProactiveHysteresis float64 // fraction improvement required to switch proactively (0=disabled)
-}
+// ProactiveHysteresis is the minimum fractional improvement in water score
+// required to switch away from the current account proactively. At 0.10, a
+// candidate must be at least 10% better to trigger a switch, preventing
+// flip-flopping between accounts with nearly equal scores.
+const ProactiveHysteresis = 0.10
 
 // Pool manages a set of Anthropic accounts and implements the selection algorithm.
 type Pool struct {
 	mu       sync.RWMutex
 	accounts []*Account
 	active   int // index into accounts
-	params   Params
 }
 
 // ParseAccountsFile reads and parses a JSON accounts file.
@@ -153,47 +149,16 @@ func ParseAccounts(data string) ([]*Account, error) {
 	return accts, nil
 }
 
-// defaultParams returns initial params scaled by N accounts.
-func defaultParams(n int) Params {
-	switch {
-	case n <= 2:
-		// 2 accounts: disable proactive switching to avoid flip-flopping.
-		return Params{SwitchThreshold5h: 0.75, HardBlock7d: 0.90, Weight5h: 0.80, Weight7d: 0.20, ProactiveHysteresis: 0.0}
-	case n <= 4:
-		// 3-4 accounts: switch proactively when best alternative is ≥20% better.
-		return Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90, Weight5h: 0.70, Weight7d: 0.30, ProactiveHysteresis: 0.20}
-	default:
-		// 5+ accounts: finer-grained routing, switch at 15% improvement.
-		return Params{SwitchThreshold5h: 0.85, HardBlock7d: 0.90, Weight5h: 0.50, Weight7d: 0.50, ProactiveHysteresis: 0.15}
-	}
-}
-
 // NewPool creates a Pool from the given accounts.
 func NewPool(accounts []*Account) *Pool {
 	return &Pool{
 		accounts: accounts,
 		active:   0,
-		params:   defaultParams(len(accounts)),
 	}
 }
 
 // Len returns the number of accounts in the pool.
-// Unlike Accounts(), this does not allocate a snapshot slice.
 func (p *Pool) Len() int { return len(p.accounts) }
-
-// Params returns a copy of current params.
-func (p *Pool) Params() Params {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.params
-}
-
-// SetParams replaces the tuning params.
-func (p *Pool) SetParams(params Params) {
-	p.mu.Lock()
-	p.params = params
-	p.mu.Unlock()
-}
 
 // ActiveName returns the name of the currently active account.
 func (p *Pool) ActiveName() string {
@@ -293,25 +258,23 @@ func (p *Pool) RateLimitFor(name string) RateLimit {
 }
 
 const (
-	window5hMins  = 5 * 60   // 300 minutes in a 5h quota window
-	window7dHours = 7 * 24   // 168 hours in a 7d quota window
+	window5hMins  = 5 * 60 // 300 minutes in a 5h quota window
+	window7dHours = 7 * 24 // 168 hours in a 7d quota window
 )
 
-// timeDecay returns a [0,1] multiplier representing how much of a reset window
-// remains. At reset time the factor is 0 (treat quota as fully recovered); with
-// the full window remaining the factor is 1 (no discount). This lets WaterScore
-// distinguish an account at 90% utilization that resets in 10 minutes from one
-// that won't reset for 4 hours — the former is nearly free and should be preferred.
+// timeDecay5h returns a [0,1] multiplier: 0 at reset (fully recovered), 1 at
+// full window remaining. Accounts near their reset score lower and float to
+// the top of the candidate pool.
 func timeDecay5h(reset time.Time) float64 {
 	if reset.IsZero() {
-		return 1.0 // no data → assume worst case (no discount)
+		return 1.0
 	}
 	minsLeft := time.Until(reset).Minutes()
 	if minsLeft <= 0 {
-		return 0.0 // already past reset → fully recovered
+		return 0.0
 	}
 	if minsLeft >= window5hMins {
-		return 1.0 // full window remaining → no discount
+		return 1.0
 	}
 	return minsLeft / window5hMins
 }
@@ -332,17 +295,14 @@ func timeDecay7d(reset time.Time) float64 {
 
 // WaterScore computes the water-filling score for an account (lower = preferred).
 //
-// Score = max(effective_5h / threshold, effective_7d / hardBlock) where each
-// effective utilization is the raw utilization discounted by the fraction of the
-// reset window remaining. An account at 90% 5h utilization that resets in 10
-// minutes scores ~3× lower than one with the same utilization that resets in 4
-// hours, because the former is nearly free.
+// Score = max(5h_util × decay5h, 7d_util × decay7d)
 //
-// Exported so callers outside the package (e.g. the proxy logger) can include
-// the score in structured log events without reimplementing the formula.
-func WaterScore(rl RateLimit, params Params) float64 {
-	s5h := (rl.FiveHourUtil * timeDecay5h(rl.FiveHourReset)) / params.SwitchThreshold5h
-	s7d := (rl.SevenDayUtil * timeDecay7d(rl.SevenDayReset)) / params.HardBlock7d
+// Both dimensions are in [0,1]. The max ensures the worse dimension dominates.
+// Time-decay naturally de-prioritizes accounts far from their reset window and
+// promotes accounts that are near reset (effectively free capacity soon).
+func WaterScore(rl RateLimit) float64 {
+	s5h := rl.FiveHourUtil * timeDecay5h(rl.FiveHourReset)
+	s7d := rl.SevenDayUtil * timeDecay7d(rl.SevenDayReset)
 	if s5h > s7d {
 		return s5h
 	}
@@ -351,62 +311,34 @@ func WaterScore(rl RateLimit, params Params) float64 {
 
 // WaterScoreFor returns the current water-filling score for the named account.
 func (p *Pool) WaterScoreFor(name string) float64 {
-	return WaterScore(p.RateLimitFor(name), p.Params())
+	return WaterScore(p.RateLimitFor(name))
 }
 
-// isBlocked reports whether an account is ineligible for selection.
-// An account that is over its static utilization threshold is NOT considered
-// blocked if its reset window arrives within the next 2 minutes — SelectBest
-// will include it as a candidate so a request can be served the moment it
-// resets, rather than waiting for the next ping cycle to notice the change.
-const nearResetGrace = 2 * time.Minute
-
-func isBlocked(rl RateLimit, params Params) bool {
-	if rl.Status == "rejected" {
-		return true
-	}
-	// 5h over threshold: blocked unless reset is imminent
-	if rl.FiveHourUtil >= params.SwitchThreshold5h {
-		if rl.FiveHourReset.IsZero() || time.Until(rl.FiveHourReset) > nearResetGrace {
-			return true
-		}
-	}
-	// 7d hard-blocked: almost always stuck for hours/days, so no grace period
-	if rl.SevenDayUtil >= params.HardBlock7d {
-		return true
-	}
-	return false
-}
-
-// SelectBest chooses the best account using a water-filling algorithm with
-// proactive switching and hysteresis. Returns the previous account name,
-// whether a switch occurred, and the switch reason. Both name and prevName
-// are captured atomically under the write lock, eliminating the TOCTOU that
-// would arise from a separate ActiveName() call before SelectBest().
+// SelectBest chooses the best account using a pure water-filling algorithm.
+// An account is only hard-blocked when the API explicitly rejects it (status
+// "rejected"). Utilization levels are handled by the water score — high
+// utilization raises the score, naturally routing requests to less-loaded
+// accounts without needing static thresholds.
 //
 // Selection priority:
-//  1. If current is blocked (rejected / over threshold) → reactive switch to
-//     the non-blocked account with the lowest water-fill score.
-//  2. If ProactiveHysteresis > 0 and a non-blocked alternative has a water
-//     score at least ProactiveHysteresis fraction lower than current → proactive
-//     switch to equalize utilization before hitting the threshold.
+//  1. Reactive switch — current account is rejected → switch to lowest water non-rejected.
+//  2. Proactive switch — a non-rejected alternative scores at least proactiveHysteresis
+//     fraction lower than current → switch to equalize load before hitting limits.
 //  3. Keep current.
-//  4. Fallback (all blocked, none rejected) → caution: pick lowest 5h.
-//  5. All rejected → stay, caller forwards 429.
+//  4. All rejected → stay, caller forwards 429.
 func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	params := p.params
 	cur := p.accounts[p.active]
 	cur.mu.RLock()
 	curRL := cur.rateLimit
 	cur.mu.RUnlock()
 
-	curBlocked := isBlocked(curRL, params)
-	curWater := WaterScore(curRL, params)
+	curRejected := curRL.Status == "rejected"
+	curWater := WaterScore(curRL)
 
-	// Find best non-blocked alternative by water-fill score.
+	// Find best non-rejected alternative by water-fill score.
 	bestIdx := -1
 	bestWater := math.MaxFloat64
 	for i, a := range p.accounts {
@@ -416,8 +348,8 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 		a.mu.RLock()
 		rl := a.rateLimit
 		a.mu.RUnlock()
-		if !isBlocked(rl, params) {
-			ws := WaterScore(rl, params)
+		if rl.Status != "rejected" {
+			ws := WaterScore(rl)
 			if ws < bestWater {
 				bestWater = ws
 				bestIdx = i
@@ -425,54 +357,28 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 		}
 	}
 
-	// Priority 1: reactive switch — current is blocked.
-	if curBlocked {
+	// Priority 1: reactive switch — current account is rejected by the API.
+	if curRejected {
 		if bestIdx >= 0 {
 			from := p.accounts[p.active].Name
 			p.active = bestIdx
 			to := p.accounts[p.active].Name
-			return to, from, true, fmt.Sprintf("threshold: %s exhausted, switching to %s", from, to)
+			return to, from, true, fmt.Sprintf("reactive: %s rejected, switching to %s (water=%.3f)", from, to, bestWater)
 		}
-
-		// Priority 4: all alternatives are also blocked — caution fallback.
-		// Pick lowest effective 5h (utilization × time-decay) among non-rejected accounts
-		// so that an account near its reset is preferred over one stuck for hours.
-		cautionIdx := -1
-		bestUtil := math.MaxFloat64
-		for i, a := range p.accounts {
-			a.mu.RLock()
-			rl := a.rateLimit
-			a.mu.RUnlock()
-			if rl.Status != "rejected" {
-				effective := rl.FiveHourUtil * timeDecay5h(rl.FiveHourReset)
-				if effective < bestUtil {
-					bestUtil = effective
-					cautionIdx = i
-				}
-			}
-		}
-		if cautionIdx >= 0 && cautionIdx != p.active {
-			from := p.accounts[p.active].Name
-			p.active = cautionIdx
-			to := p.accounts[p.active].Name
-			return to, from, true, fmt.Sprintf("caution-fallback: all near-threshold, %s has lowest 5h", to)
-		}
-
-		// Priority 5: all rejected — stay, caller forwards 429.
+		// All rejected — stay, caller forwards 429.
 		return cur.Name, cur.Name, false, ""
 	}
 
-	// Priority 2: proactive switch — current is fine but a significantly
-	// less-loaded account is available.
-	if params.ProactiveHysteresis > 0 && bestIdx >= 0 {
-		threshold := curWater * (1 - params.ProactiveHysteresis)
+	// Priority 2: proactive switch — a significantly less-loaded account is available.
+	if bestIdx >= 0 && curWater > 0 {
+		threshold := curWater * (1 - ProactiveHysteresis)
 		if bestWater < threshold {
 			from := p.accounts[p.active].Name
 			p.active = bestIdx
 			to := p.accounts[p.active].Name
 			return to, from, true, fmt.Sprintf(
-				"proactive: %s water=%.3f → %s water=%.3f (hysteresis=%.0f%%)",
-				from, curWater, to, bestWater, params.ProactiveHysteresis*100,
+				"proactive: %s water=%.3f → %s water=%.3f",
+				from, curWater, to, bestWater,
 			)
 		}
 	}
@@ -481,17 +387,20 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 	return cur.Name, cur.Name, false, ""
 }
 
-// SoonestReset returns the soonest 5h reset time among all accounts.
+// SoonestReset returns the soonest reset time (5h or 7d) among all accounts.
 func (p *Pool) SoonestReset() time.Time {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	var soonest time.Time
 	for _, a := range p.accounts {
 		a.mu.RLock()
-		t := a.rateLimit.FiveHourReset
+		r5 := a.rateLimit.FiveHourReset
+		r7 := a.rateLimit.SevenDayReset
 		a.mu.RUnlock()
-		if !t.IsZero() && (soonest.IsZero() || t.Before(soonest)) {
-			soonest = t
+		for _, t := range []time.Time{r5, r7} {
+			if !t.IsZero() && (soonest.IsZero() || t.Before(soonest)) {
+				soonest = t
+			}
 		}
 	}
 	return soonest

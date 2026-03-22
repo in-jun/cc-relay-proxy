@@ -3,7 +3,6 @@ package proxy
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"sync"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/in-jun/cc-relay-proxy/internal/accounts"
 	"github.com/in-jun/cc-relay-proxy/internal/logger"
-	"github.com/in-jun/cc-relay-proxy/internal/tuner"
 )
 
 const pingModel = "claude-haiku-4-5-20251001"
@@ -38,55 +36,11 @@ type Pinger struct {
 	pool   *accounts.Pool
 	log    *logger.Logger
 	server *Server
-	tuner  *tuner.Tuner
 }
 
 // NewPinger creates a Pinger.
 func NewPinger(pool *accounts.Pool, l *logger.Logger, server *Server) *Pinger {
 	return &Pinger{pool: pool, log: l, server: server}
-}
-
-// SetTuner attaches the tuner so /status can include tune history.
-func (p *Pinger) SetTuner(t *tuner.Tuner) {
-	p.tuner = t
-}
-
-// TuneHistory returns serializable tune history for the status endpoint.
-func (p *Pinger) TuneHistory() any {
-	if p.tuner == nil {
-		return []any{}
-	}
-	return p.tuner.History()
-}
-
-// TuneInterval returns the configured interval, or zero if no tuner.
-func (p *Pinger) TuneInterval() time.Duration {
-	if p.tuner == nil {
-		return 0
-	}
-	return p.tuner.Interval()
-}
-
-// LastTuned returns when the tuner last ran (zero if never).
-func (p *Pinger) LastTuned() string {
-	if p.tuner == nil {
-		return "never"
-	}
-	lt := p.tuner.LastTuned()
-	if lt.IsZero() {
-		return "never"
-	}
-	return formatAgoSimple(time.Since(lt))
-}
-
-func formatAgoSimple(d time.Duration) string {
-	if d < time.Minute {
-		return "just now"
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	}
-	return fmt.Sprintf("%dh ago", int(d.Hours()))
 }
 
 // StartupPing pings all accounts once to establish baseline rate limit state.
@@ -141,18 +95,17 @@ func (p *Pinger) Run(ctx context.Context) {
 	}
 }
 
-// checkAndPingResets pings blocked accounts whose reset time has passed.
+// checkAndPingResets pings accounts whose reset time has passed.
+// With the pure water-score model, only "rejected" status hard-blocks an account.
+// High utilization alone does not block, but we still ping after resets for
+// accurate state updates — especially useful after a rejection clears.
 func (p *Pinger) checkAndPingResets(ctx context.Context, scheduled map[string]time.Time) {
 	now := time.Now()
-	params := p.pool.Params()
 	for _, snap := range p.pool.Accounts() {
 		rl := snap.RateLimit
 
-		// Account must actually be blocked to warrant a reset-ping.
-		blocked := rl.Status == "rejected" ||
-			rl.FiveHourUtil >= params.SwitchThreshold5h ||
-			rl.SevenDayUtil >= params.HardBlock7d
-		if !blocked {
+		// Only ping accounts that were explicitly rejected by the API.
+		if rl.Status != "rejected" {
 			continue
 		}
 
@@ -225,11 +178,10 @@ func (p *Pinger) pingAccount(ctx context.Context, name string) {
 	rl, hasRL := accounts.ParseRateLimitHeaders(resp.Header)
 	if hasRL {
 		p.pool.UpdateRateLimit(name, rl)
-		params := p.pool.Params()
 		p.log.Log("ping", name, map[string]any{
 			"fiveHour":  rl.FiveHourUtil,
 			"sevenDay":  rl.SevenDayUtil,
-			"water":     accounts.WaterScore(rl, params),
+			"water":     accounts.WaterScore(rl),
 			"status":    rl.Status,
 			"latencyMs": time.Since(start).Milliseconds(),
 		})
@@ -237,9 +189,8 @@ func (p *Pinger) pingAccount(ctx context.Context, name string) {
 }
 
 // emitPoolSnapshot logs a point-in-time view of all accounts' utilization and
-// water scores. Used by the tuner's log analysis to understand pool state over time.
+// water scores. Used by the 12h analysis loop to understand pool state over time.
 func (p *Pinger) emitPoolSnapshot(trigger string) {
-	params := p.pool.Params()
 	snaps := p.pool.Accounts()
 	accts := make([]map[string]any, len(snaps))
 	for i, snap := range snaps {
@@ -249,7 +200,7 @@ func (p *Pinger) emitPoolSnapshot(trigger string) {
 			"isActive": snap.IsActive,
 			"fiveHour": rl.FiveHourUtil,
 			"sevenDay": rl.SevenDayUtil,
-			"water":    accounts.WaterScore(rl, params),
+			"water":    accounts.WaterScore(rl),
 			"status":   rl.Status,
 		}
 	}

@@ -15,8 +15,8 @@ func makePool(n int) *Pool {
 	accts := make([]*Account, n)
 	for i := range accts {
 		accts[i] = &Account{
-			Name:  "acct" + string(rune('0'+i+1)),
-			token: newToken("rt_" + string(rune('a'+i))),
+			Name:      "acct" + string(rune('0'+i+1)),
+			token:     newToken("rt_" + string(rune('a'+i))),
 			rateLimit: RateLimit{Status: "allowed"},
 		}
 	}
@@ -34,17 +34,17 @@ func TestSelectBestKeepsCurrent(t *testing.T) {
 	}
 }
 
-func TestSelectBestSwitchesOnThreshold(t *testing.T) {
+func TestSelectBestReactiveSwitchOnRejected(t *testing.T) {
 	p := makePool(2)
-	// Push active account over threshold
+	// Active account is rejected by the API.
 	p.accounts[0].rateLimit = RateLimit{
-		Status:       "allowed_warning",
-		FiveHourUtil: 0.90, // over 0.75 threshold for 2 accounts
+		Status:       "rejected",
+		FiveHourUtil: 1.0,
 	}
 
 	name, prevName, switched, reason := p.SelectBest()
 	if !switched {
-		t.Error("should switch when active is over threshold")
+		t.Error("should switch when active is rejected")
 	}
 	if name != "acct2" {
 		t.Errorf("want acct2, got %s", name)
@@ -53,7 +53,26 @@ func TestSelectBestSwitchesOnThreshold(t *testing.T) {
 		t.Error("switch reason should not be empty")
 	}
 	if prevName != "acct1" {
-		t.Errorf("prevName should be acct1 (account before switch), got %s", prevName)
+		t.Errorf("prevName should be acct1, got %s", prevName)
+	}
+	if !strings.Contains(reason, "reactive") {
+		t.Errorf("reason should contain 'reactive', got %q", reason)
+	}
+}
+
+func TestSelectBestHighUtilDoesNotBlock(t *testing.T) {
+	// High utilization alone no longer triggers a reactive switch — only
+	// "rejected" status does. A high-util account should stay current unless
+	// proactive hysteresis kicks in.
+	p := makePool(2)
+	farFuture := time.Now().Add(200 * time.Hour)
+	// acct1 at 95% — both accounts have same water structure so no proactive switch
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: 0.95, FiveHourReset: farFuture}
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.94, FiveHourReset: farFuture}
+
+	_, _, switched, _ := p.SelectBest()
+	if switched {
+		t.Error("high utilization alone should not trigger reactive switch")
 	}
 }
 
@@ -70,6 +89,56 @@ func TestSelectBestAllRejected(t *testing.T) {
 	_, _, switched, _ := p.SelectBest()
 	if switched {
 		t.Error("should not switch when all are rejected")
+	}
+}
+
+func TestSelectBestProactiveSwitches(t *testing.T) {
+	// proactiveHysteresis = 0.10.
+	// acct1 water=0.70, acct2 water=0.40 → 0.40 < 0.70*(1-0.10)=0.63 → proactive switch.
+	p := makePool(3)
+	farFuture := time.Now().Add(200 * time.Hour)
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.70, FiveHourReset: farFuture}
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.40, FiveHourReset: farFuture}
+	p.accounts[2].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.60, FiveHourReset: farFuture}
+
+	name, prevName, switched, reason := p.SelectBest()
+	if !switched {
+		t.Error("should proactively switch to less-loaded account")
+	}
+	if name != "acct2" {
+		t.Errorf("want acct2 (lowest water), got %s", name)
+	}
+	if prevName != "acct1" {
+		t.Errorf("prevName should be acct1, got %s", prevName)
+	}
+	if !strings.Contains(reason, "proactive") {
+		t.Errorf("reason should contain 'proactive', got %q", reason)
+	}
+}
+
+func TestSelectBestProactiveNoSwitchInsideHysteresis(t *testing.T) {
+	// acct2 water is only slightly better — within the 10% hysteresis band → no switch.
+	// acct1=0.70, acct2=0.65 → 0.65 > 0.70*(1-0.10)=0.63 → no switch
+	p := makePool(3)
+	farFuture := time.Now().Add(200 * time.Hour)
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.70, FiveHourReset: farFuture}
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.65, FiveHourReset: farFuture}
+	p.accounts[2].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.68, FiveHourReset: farFuture}
+
+	_, _, switched, _ := p.SelectBest()
+	if switched {
+		t.Error("should not switch when alternative is within hysteresis band")
+	}
+}
+
+func TestSelectBestProactiveSkippedWhenCurrentWaterZero(t *testing.T) {
+	// curWater=0 → proactive branch skipped (division guard).
+	p := makePool(2)
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0, SevenDayUtil: 0}
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0, SevenDayUtil: 0}
+	_, _, switched, _ := p.SelectBest()
+	if switched {
+		t.Error("should not switch when current water score is zero")
 	}
 }
 
@@ -101,7 +170,6 @@ func TestParseRateLimitHeaders(t *testing.T) {
 
 func TestAllRejectedPartial(t *testing.T) {
 	p := makePool(3)
-	// Only one account rejected — AllRejected should return false
 	p.accounts[0].rateLimit = RateLimit{Status: "rejected"}
 	p.accounts[1].rateLimit = RateLimit{Status: "allowed"}
 	p.accounts[2].rateLimit = RateLimit{Status: "rejected"}
@@ -111,286 +179,88 @@ func TestAllRejectedPartial(t *testing.T) {
 	}
 }
 
-func TestSelectBestCautionFallback(t *testing.T) {
-	// All accounts over threshold (caution) but none rejected — Priority 3.
-	// Should switch to the account with the lowest 5h utilization.
-	p := makePool(3)
-	threshold := p.Params().SwitchThreshold5h // 0.85 for N=3
-
-	// All accounts over threshold, none rejected
-	p.accounts[0].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.05} // active, highest
-	p.accounts[1].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.02} // lowest
-	p.accounts[2].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.04}
-
-	name, prevName, switched, reason := p.SelectBest()
-	if !switched {
-		t.Error("should switch to caution-fallback account")
-	}
-	if name != "acct2" {
-		t.Errorf("caution fallback: want acct2 (lowest 5h), got %s", name)
-	}
-	if prevName != "acct1" {
-		t.Errorf("prevName should be acct1, got %s", prevName)
-	}
-	if !strings.Contains(reason, "caution-fallback") {
-		t.Errorf("reason should contain 'caution-fallback', got %q", reason)
-	}
-}
-
-func TestSelectBestCautionFallbackStaysWhenCurrentIsBest(t *testing.T) {
-	// All accounts over threshold, current has lowest 5h — should stay.
-	p := makePool(3)
-	threshold := p.Params().SwitchThreshold5h
-
-	p.accounts[0].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.01} // active, lowest
-	p.accounts[1].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.05}
-	p.accounts[2].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: threshold + 0.08}
-
-	_, _, switched, _ := p.SelectBest()
-	if switched {
-		t.Error("should not switch when current has lowest 5h in caution-fallback")
-	}
-}
-
-func TestSoonestResetSkipsZeroTimes(t *testing.T) {
+func TestSoonestResetConsidersBothWindows(t *testing.T) {
 	p := makePool(2)
-	// a1 has no reset time (zero), a2 has a real reset time
-	reset := time.Now().Add(5 * time.Minute)
-	p.accounts[0].rateLimit = RateLimit{Status: "rejected", FiveHourReset: time.Time{}} // zero
-	p.accounts[1].rateLimit = RateLimit{Status: "rejected", FiveHourReset: reset}
+	reset5h := time.Now().Add(5 * time.Minute)
+	reset7d := time.Now().Add(3 * time.Minute) // 7d resets sooner
+	p.accounts[0].rateLimit = RateLimit{Status: "rejected", FiveHourReset: reset5h, SevenDayReset: reset7d}
+	p.accounts[1].rateLimit = RateLimit{Status: "rejected"} // zero times
 
 	soonest := p.SoonestReset()
-	if soonest != reset {
-		t.Errorf("SoonestReset should skip zero times and return a2's reset; got %v, want %v", soonest, reset)
-	}
-}
-
-func TestParseAccounts(t *testing.T) {
-	raw, _ := json.Marshal([]AccountConfig{
-		{Name: "main", RefreshToken: "rt_main"},
-		{RefreshToken: "rt_anon"}, // no name → should default to "acct2"
-	})
-	accts, err := ParseAccounts(string(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(accts) != 2 {
-		t.Fatalf("want 2 accounts, got %d", len(accts))
-	}
-	if accts[0].Name != "main" {
-		t.Errorf("want main, got %s", accts[0].Name)
-	}
-	if accts[1].Name != "acct2" {
-		t.Errorf("want acct2, got %s", accts[1].Name)
-	}
-}
-
-func TestParseAccountsSeededToken(t *testing.T) {
-	expiresAt := time.Now().Add(1 * time.Hour).UnixMilli()
-	raw, _ := json.Marshal([]AccountConfig{
-		{Name: "seeded", RefreshToken: "rt1", AccessToken: "at1", ExpiresAt: expiresAt},
-	})
-	accts, err := ParseAccounts(string(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Token should be immediately usable without a refresh
-	tok, err := accts[0].token.Ensure(context.Background())
-	if err != nil {
-		t.Fatalf("Ensure failed: %v", err)
-	}
-	if tok != "at1" {
-		t.Errorf("want at1, got %s", tok)
-	}
-}
-
-func TestParseAccountsEmpty(t *testing.T) {
-	_, err := ParseAccounts("[]")
-	if err == nil {
-		t.Error("expected error for empty accounts list")
-	}
-}
-
-func TestParseAccountsMissingRefreshToken(t *testing.T) {
-	raw, _ := json.Marshal([]AccountConfig{
-		{Name: "bad", RefreshToken: ""},
-	})
-	_, err := ParseAccounts(string(raw))
-	if err == nil {
-		t.Error("expected error for missing refreshToken")
-	}
-}
-
-func TestPoolLen(t *testing.T) {
-	p := makePool(3)
-	if p.Len() != 3 {
-		t.Errorf("want 3, got %d", p.Len())
-	}
-}
-
-func TestPoolParamsAndSetParams(t *testing.T) {
-	p := makePool(2)
-	got := p.Params()
-	if got.SwitchThreshold5h != 0.75 {
-		t.Errorf("want 0.75 initial, got %f", got.SwitchThreshold5h)
-	}
-	if got.ProactiveHysteresis != 0.0 {
-		t.Errorf("N=2: want ProactiveHysteresis=0.0, got %f", got.ProactiveHysteresis)
-	}
-	p.SetParams(Params{SwitchThreshold5h: 0.50, HardBlock7d: 0.90, Weight5h: 0.60, Weight7d: 0.40, ProactiveHysteresis: 0.10})
-	got = p.Params()
-	if got.SwitchThreshold5h != 0.50 {
-		t.Errorf("want 0.50 after set, got %f", got.SwitchThreshold5h)
-	}
-	if got.ProactiveHysteresis != 0.10 {
-		t.Errorf("want ProactiveHysteresis=0.10 after set, got %f", got.ProactiveHysteresis)
-	}
-}
-
-func TestSelectBestProactiveSwitches(t *testing.T) {
-	// N=3 → ProactiveHysteresis=0.20 by default.
-	// acct1 active: water=0.70; acct2: water=0.40 → 0.40 < 0.70*(1-0.20)=0.56 → proactive switch.
-	p := makePool(3)
-	params := p.Params()
-	// acct1: 5h=0.70*threshold, 7d=0 → waterScore = max(0.70,0) = 0.70
-	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.70 * params.SwitchThreshold5h}
-	// acct2: 5h=0.40*threshold, 7d=0 → waterScore = 0.40
-	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.40 * params.SwitchThreshold5h}
-	// acct3: water=0.60 (worse than acct2, should not be chosen)
-	p.accounts[2].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.60 * params.SwitchThreshold5h}
-
-	name, prevName, switched, reason := p.SelectBest()
-	if !switched {
-		t.Error("should proactively switch to less-loaded account")
-	}
-	if name != "acct2" {
-		t.Errorf("want acct2 (lowest water), got %s", name)
-	}
-	if prevName != "acct1" {
-		t.Errorf("prevName should be acct1, got %s", prevName)
-	}
-	if !strings.Contains(reason, "proactive") {
-		t.Errorf("reason should contain 'proactive', got %q", reason)
-	}
-}
-
-func TestSelectBestProactiveNoSwitchInsideHysteresis(t *testing.T) {
-	// acct2 water is only slightly better — within hysteresis band → no switch.
-	p := makePool(3)
-	params := p.Params()
-	// acct1 water=0.70, acct2 water=0.65 → 0.65 > 0.70*(1-0.20)=0.56 → no switch
-	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.70 * params.SwitchThreshold5h}
-	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.65 * params.SwitchThreshold5h}
-	p.accounts[2].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.68 * params.SwitchThreshold5h}
-
-	_, _, switched, _ := p.SelectBest()
-	if switched {
-		t.Error("should not switch when alternative is within hysteresis band")
-	}
-}
-
-func TestSelectBestProactiveDisabledForTwoAccounts(t *testing.T) {
-	// N=2 → ProactiveHysteresis=0.0 → proactive switching disabled.
-	p := makePool(2)
-	params := p.Params()
-	if params.ProactiveHysteresis != 0.0 {
-		t.Fatalf("N=2 should have ProactiveHysteresis=0.0, got %f", params.ProactiveHysteresis)
-	}
-	// acct2 is much less loaded — but proactive is disabled
-	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.70 * params.SwitchThreshold5h}
-	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.01 * params.SwitchThreshold5h}
-
-	_, _, switched, _ := p.SelectBest()
-	if switched {
-		t.Error("N=2 should not proactively switch (ProactiveHysteresis=0)")
+	if soonest != reset7d {
+		t.Errorf("SoonestReset should return earliest of 5h/7d across all accounts; got %v, want %v", soonest, reset7d)
 	}
 }
 
 func TestWaterScore(t *testing.T) {
 	const eps = 1e-6
-	params := Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90}
-	// Must be beyond both windows: 5h window=300min, 7d window=168h
-	farFuture := time.Now().Add(200 * time.Hour) // full window remaining → decay=1, no discount
+	farFuture := time.Now().Add(200 * time.Hour) // beyond both windows → decay=1
 
-	// 5h dominates (no decay): max(0.64*1/0.80, 0.27*1/0.90) = max(0.80, 0.30) = 0.80
+	// 5h dominates: max(0.64*1, 0.27*1) = 0.64
 	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27, FiveHourReset: farFuture, SevenDayReset: farFuture}
-	ws := WaterScore(rl, params)
-	want5h := 0.64 / 0.80
-	if ws < want5h-eps || ws > want5h+eps {
-		t.Errorf("5h-dominant: want %.6f, got %.6f", want5h, ws)
+	ws := WaterScore(rl)
+	if ws < 0.64-eps || ws > 0.64+eps {
+		t.Errorf("5h-dominant: want 0.640000, got %.6f", ws)
 	}
 
-	// 7d dominates (no decay): max(0.10*1/0.80, 0.81*1/0.90) = max(0.125, 0.90) = 0.90
+	// 7d dominates: max(0.10*1, 0.81*1) = 0.81
 	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81, FiveHourReset: farFuture, SevenDayReset: farFuture}
-	ws2 := WaterScore(rl2, params)
-	want7d := 0.81 / 0.90
-	if ws2 < want7d-eps || ws2 > want7d+eps {
-		t.Errorf("7d-dominant: want %.6f, got %.6f", want7d, ws2)
+	ws2 := WaterScore(rl2)
+	if ws2 < 0.81-eps || ws2 > 0.81+eps {
+		t.Errorf("7d-dominant: want 0.810000, got %.6f", ws2)
 	}
 }
 
 func TestWaterScoreTimeDecay(t *testing.T) {
-	const eps = 1e-6
-	params := Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90}
-
-	// 5h=90%, resets in 30 minutes out of 300-minute window → decay = 30/300 = 0.10
-	// effective_5h = 0.90 * 0.10 / 0.80 = 0.1125
-	// 7d=50%, resets far future → effective_7d = 0.50/0.90 = 0.556
-	// water = max(0.1125, 0.556) = 0.556  (7d dominates despite low absolute value)
+	// 5h=90%, resets in 30 of 300 minutes → decay=0.10 → effective_5h=0.09
+	// 7d=50%, resets far future → effective_7d=0.50
+	// water = max(0.09, 0.50) = 0.50
+	const eps = 0.01
 	resetSoon := time.Now().Add(30 * time.Minute)
 	farFuture := time.Now().Add(200 * time.Hour)
 	rl := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.50, FiveHourReset: resetSoon, SevenDayReset: farFuture}
-	ws := WaterScore(rl, params)
-	wantDecayed := 0.50 / 0.90 // 7d term dominates
-	if ws < wantDecayed-eps || ws > wantDecayed+0.01 {
-		t.Errorf("time-decayed 5h: want ~%.6f, got %.6f", wantDecayed, ws)
+	ws := WaterScore(rl)
+	if ws < 0.50-eps || ws > 0.50+eps {
+		t.Errorf("time-decayed 5h: want ~0.50, got %.6f", ws)
 	}
-	// Must score lower than the same account with a far reset
+
+	// Must score lower than same account with far 5h reset
 	rlFar := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.50, FiveHourReset: farFuture, SevenDayReset: farFuture}
-	wsFar := WaterScore(rlFar, params)
+	wsFar := WaterScore(rlFar)
 	if ws >= wsFar {
 		t.Errorf("near-reset account should score lower: near=%.4f far=%.4f", ws, wsFar)
 	}
 }
 
 func TestWaterScoreZeroReset(t *testing.T) {
-	// Reset already past → decay=0 → effective util=0 → score near 0
-	params := Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90}
+	// Reset already past → decay=0 → effective util=0 → score=0
 	pastReset := time.Now().Add(-1 * time.Minute)
 	rl := RateLimit{FiveHourUtil: 0.95, SevenDayUtil: 0.95, FiveHourReset: pastReset, SevenDayReset: pastReset}
-	ws := WaterScore(rl, params)
+	ws := WaterScore(rl)
 	if ws > 1e-9 {
 		t.Errorf("past-reset account should score 0, got %.6f", ws)
 	}
 }
 
-func TestIsBlockedNearReset(t *testing.T) {
-	params := Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90}
+func TestIsBlockedOnlyOnRejected(t *testing.T) {
+	// Verify blocking behavior via SelectBest: only "rejected" triggers reactive switch.
+	p := makePool(2)
 
-	// Over threshold but resets in 90 seconds → within 2-minute grace → NOT blocked
-	rl := RateLimit{
-		Status:       "allowed_warning",
-		FiveHourUtil: 0.85,
-		FiveHourReset: time.Now().Add(90 * time.Second),
-	}
-	if isBlocked(rl, params) {
-		t.Error("account over threshold but resetting in 90s should NOT be blocked")
-	}
-
-	// Over threshold, resets in 5 minutes → outside grace → blocked
-	rl2 := RateLimit{
-		Status:       "allowed_warning",
-		FiveHourUtil: 0.85,
-		FiveHourReset: time.Now().Add(5 * time.Minute),
-	}
-	if !isBlocked(rl2, params) {
-		t.Error("account over threshold with 5m to reset should be blocked")
+	// allowed_warning at 99% — no reactive switch (high util alone does not block).
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: 0.99, SevenDayUtil: 0.99}
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.98}
+	_, _, switched, _ := p.SelectBest()
+	if switched {
+		t.Error("allowed_warning at 99% should NOT trigger reactive switch")
 	}
 
-	// rejected status always blocked regardless of reset time
-	rl3 := RateLimit{Status: "rejected", FiveHourReset: time.Now().Add(30 * time.Second)}
-	if !isBlocked(rl3, params) {
-		t.Error("rejected account should always be blocked")
+	// Reset and try with rejected — should trigger reactive switch.
+	p2 := makePool(2)
+	p2.accounts[0].rateLimit = RateLimit{Status: "rejected", FiveHourUtil: 1.0}
+	p2.accounts[1].rateLimit = RateLimit{Status: "allowed"}
+	_, _, switched2, _ := p2.SelectBest()
+	if !switched2 {
+		t.Error("rejected account should trigger reactive switch")
 	}
 }
 
@@ -437,17 +307,15 @@ func TestUpdateRateLimitUnknownAccount(t *testing.T) {
 
 func TestPoolAccounts(t *testing.T) {
 	p := makePool(3)
-	// Switch active to acct2
-	p.accounts[1].rateLimit = RateLimit{Status: "allowed"} // already allowed
-	// Force a switch by blocking acct1
+	// Force a switch by rejecting acct1
 	p.accounts[0].rateLimit = RateLimit{Status: "rejected", FiveHourUtil: 1.0}
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed"}
 	p.SelectBest() // switches to acct2
 
 	snaps := p.Accounts()
 	if len(snaps) != 3 {
 		t.Fatalf("want 3 snapshots, got %d", len(snaps))
 	}
-	// Find the active one
 	var active *AccountSnapshot
 	for i := range snaps {
 		if snaps[i].IsActive {
@@ -529,13 +397,10 @@ func TestSetRefreshCallback(t *testing.T) {
 		_ = name
 		_ = expiresInMins
 	})
-	// Callback is registered; actual invocation tested in token_test.go
-	// Just verify no panic and the field is wired (black-box check)
 	_ = called
 }
 
 func TestParseRateLimitHeadersMissingStatus(t *testing.T) {
-	// No status header → should return false
 	h := http.Header{}
 	h.Set("anthropic-ratelimit-unified-5h-utilization", "0.50")
 	_, ok := ParseRateLimitHeaders(h)
@@ -545,7 +410,6 @@ func TestParseRateLimitHeadersMissingStatus(t *testing.T) {
 }
 
 func TestParseRateLimitHeadersPartial(t *testing.T) {
-	// Only status header — other fields default to zero
 	h := http.Header{}
 	h.Set("anthropic-ratelimit-unified-status", "allowed")
 	rl, ok := ParseRateLimitHeaders(h)
@@ -563,72 +427,65 @@ func TestParseRateLimitHeadersPartial(t *testing.T) {
 	}
 }
 
-func TestParseAccountsInvalidJSON(t *testing.T) {
-	_, err := ParseAccounts("not-valid-json")
-	if err == nil {
-		t.Error("expected error for invalid JSON input")
-	}
-}
-
-func TestSetRefreshCallbackInvoked(t *testing.T) {
-	// Start a fake token endpoint that returns a valid token.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "at_fresh",
-			"expires_in":   3600,
-		})
-	}))
-	defer srv.Close()
-
-	orig := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = orig }()
-
-	// Non-seeded pool — tokens need a refresh on first Ensure.
-	p := makePool(2)
-
-	var gotName string
-	var gotMins int
-	p.SetRefreshCallback(func(name string, mins int) {
-		gotName = name
-		gotMins = mins
+func TestParseAccounts(t *testing.T) {
+	raw, _ := json.Marshal([]AccountConfig{
+		{Name: "main", RefreshToken: "rt_main"},
+		{RefreshToken: "rt_anon"},
 	})
-
-	// ActiveToken triggers Ensure → refresh → callback.
-	_, err := p.ActiveToken(context.Background())
+	accts, err := ParseAccounts(string(raw))
 	if err != nil {
-		t.Fatalf("ActiveToken: %v", err)
+		t.Fatal(err)
 	}
-	if gotName != "acct1" {
-		t.Errorf("callback name: want acct1, got %q", gotName)
+	if len(accts) != 2 {
+		t.Fatalf("want 2 accounts, got %d", len(accts))
 	}
-	if gotMins != 60 {
-		t.Errorf("callback mins: want 60, got %d", gotMins)
+	if accts[0].Name != "main" {
+		t.Errorf("want main, got %s", accts[0].Name)
+	}
+	if accts[1].Name != "acct2" {
+		t.Errorf("want acct2, got %s", accts[1].Name)
 	}
 }
 
-func TestDefaultParams(t *testing.T) {
-	p2 := defaultParams(2)
-	if p2.SwitchThreshold5h != 0.75 {
-		t.Errorf("N=2: want 0.75, got %f", p2.SwitchThreshold5h)
+func TestParseAccountsSeededToken(t *testing.T) {
+	expiresAt := time.Now().Add(1 * time.Hour).UnixMilli()
+	raw, _ := json.Marshal([]AccountConfig{
+		{Name: "seeded", RefreshToken: "rt1", AccessToken: "at1", ExpiresAt: expiresAt},
+	})
+	accts, err := ParseAccounts(string(raw))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if p2.ProactiveHysteresis != 0.0 {
-		t.Errorf("N=2: want ProactiveHysteresis=0.0, got %f", p2.ProactiveHysteresis)
+	tok, err := accts[0].token.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure failed: %v", err)
 	}
-	p4 := defaultParams(4)
-	if p4.SwitchThreshold5h != 0.80 {
-		t.Errorf("N=4: want 0.80, got %f", p4.SwitchThreshold5h)
+	if tok != "at1" {
+		t.Errorf("want at1, got %s", tok)
 	}
-	if p4.ProactiveHysteresis != 0.20 {
-		t.Errorf("N=4: want ProactiveHysteresis=0.20, got %f", p4.ProactiveHysteresis)
+}
+
+func TestParseAccountsEmpty(t *testing.T) {
+	_, err := ParseAccounts("[]")
+	if err == nil {
+		t.Error("expected error for empty accounts list")
 	}
-	p5 := defaultParams(5)
-	if p5.SwitchThreshold5h != 0.85 {
-		t.Errorf("N=5: want 0.85, got %f", p5.SwitchThreshold5h)
+}
+
+func TestParseAccountsMissingRefreshToken(t *testing.T) {
+	raw, _ := json.Marshal([]AccountConfig{
+		{Name: "bad", RefreshToken: ""},
+	})
+	_, err := ParseAccounts(string(raw))
+	if err == nil {
+		t.Error("expected error for missing refreshToken")
 	}
-	if p5.ProactiveHysteresis != 0.15 {
-		t.Errorf("N=5: want ProactiveHysteresis=0.15, got %f", p5.ProactiveHysteresis)
+}
+
+func TestPoolLen(t *testing.T) {
+	p := makePool(3)
+	if p.Len() != 3 {
+		t.Errorf("want 3, got %d", p.Len())
 	}
 }
 
@@ -636,13 +493,11 @@ func TestInvalidateToken(t *testing.T) {
 	accts, _ := ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999}]`)
 	pool := NewPool(accts)
 
-	// Confirm token is initially available.
 	got, err := pool.TokenFor(context.Background(), "a1")
 	if err != nil || got != "tok1" {
 		t.Fatalf("pre-invalidate: want tok1, got %q err=%v", got, err)
 	}
 
-	// After invalidation, the token struct should be cleared.
 	pool.InvalidateToken("a1")
 	for _, a := range pool.accounts {
 		a.mu.RLock()
@@ -656,7 +511,6 @@ func TestInvalidateToken(t *testing.T) {
 		}
 	}
 
-	// Unknown account name → no-op.
 	pool.InvalidateToken("nonexistent")
 }
 
@@ -700,7 +554,6 @@ func TestPersistAccounts(t *testing.T) {
 		t.Fatalf("PersistAccounts: %v", err)
 	}
 
-	// Read back and verify
 	reloaded, err := ParseAccountsFile(f.Name())
 	if err != nil {
 		t.Fatalf("reload: %v", err)
@@ -713,7 +566,6 @@ func TestPersistAccounts(t *testing.T) {
 func TestPersistAccountsBadPath(t *testing.T) {
 	accts, _ := ParseAccounts(`[{"name":"a1","refreshToken":"rt1"}]`)
 	pool := NewPool(accts)
-	// Directory that doesn't exist — CreateTemp should fail
 	err := pool.PersistAccounts("/tmp/nonexistent-dir-cc/accounts.json")
 	if err == nil {
 		t.Fatal("expected error for bad path")
@@ -733,7 +585,6 @@ func TestWatchRotations(t *testing.T) {
 	pool := NewPool(accts)
 	pool.WatchRotations(f.Name())
 
-	// Simulate a rotation by firing the callback on the token directly
 	for _, a := range pool.accounts {
 		a.mu.RLock()
 		tok := a.token
@@ -744,11 +595,9 @@ func TestWatchRotations(t *testing.T) {
 		if cb == nil {
 			t.Fatal("WatchRotations did not set rotate callback")
 		}
-		// Fire it with updated credentials
 		cb("rt2", "tok2", time.Now().Add(time.Hour))
 	}
 
-	// File should now contain the updated credentials
 	reloaded, err := ParseAccountsFile(f.Name())
 	if err != nil {
 		t.Fatalf("reload after rotation: %v", err)
@@ -759,7 +608,6 @@ func TestWatchRotations(t *testing.T) {
 }
 
 func TestWatchRotationsCallbackError(t *testing.T) {
-	// Create a temp dir and place the accounts file inside it
 	dir, err := os.MkdirTemp("", "cc-watch-err-*")
 	if err != nil {
 		t.Fatal(err)
@@ -775,10 +623,8 @@ func TestWatchRotationsCallbackError(t *testing.T) {
 	pool := NewPool(accts)
 	pool.WatchRotations(path)
 
-	// Remove the directory so PersistAccounts fails when the callback fires
 	os.RemoveAll(dir)
 
-	// Fire the callback — PersistAccounts will fail, log.Printf branch executes
 	for _, a := range pool.accounts {
 		a.mu.RLock()
 		tok := a.token
@@ -790,5 +636,46 @@ func TestWatchRotationsCallbackError(t *testing.T) {
 			cb("rt2", "tok2", time.Now().Add(time.Hour))
 		}
 	}
-	// If we reach here without panic, the error path was handled correctly
+}
+
+func TestParseAccountsInvalidJSON(t *testing.T) {
+	_, err := ParseAccounts("not-valid-json")
+	if err == nil {
+		t.Error("expected error for invalid JSON input")
+	}
+}
+
+func TestSetRefreshCallbackInvoked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "at_fresh",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	orig := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = orig }()
+
+	p := makePool(2)
+
+	var gotName string
+	var gotMins int
+	p.SetRefreshCallback(func(name string, mins int) {
+		gotName = name
+		gotMins = mins
+	})
+
+	_, err := p.ActiveToken(context.Background())
+	if err != nil {
+		t.Fatalf("ActiveToken: %v", err)
+	}
+	if gotName != "acct1" {
+		t.Errorf("callback name: want acct1, got %q", gotName)
+	}
+	if gotMins != 60 {
+		t.Errorf("callback mins: want 60, got %d", gotMins)
+	}
 }
