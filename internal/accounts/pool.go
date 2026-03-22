@@ -292,16 +292,23 @@ func (p *Pool) RateLimitFor(name string) RateLimit {
 	return RateLimit{}
 }
 
-// waterScore computes the water-filling score for an account (lower = preferred).
+// WaterScore computes the water-filling score for an account (lower = preferred).
 // Uses max(5h_util/threshold, 7d_util/hardBlock) so routing naturally equalizes
 // utilization across both dimensions simultaneously.
-func waterScore(rl RateLimit, params Params) float64 {
+// Exported so callers outside the package (e.g. the proxy logger) can include
+// the score in structured log events without reimplementing the formula.
+func WaterScore(rl RateLimit, params Params) float64 {
 	s5h := rl.FiveHourUtil / params.SwitchThreshold5h
 	s7d := rl.SevenDayUtil / params.HardBlock7d
 	if s5h > s7d {
 		return s5h
 	}
 	return s7d
+}
+
+// WaterScoreFor returns the current water-filling score for the named account.
+func (p *Pool) WaterScoreFor(name string) float64 {
+	return WaterScore(p.RateLimitFor(name), p.Params())
 }
 
 func isBlocked(rl RateLimit, params Params) bool {
@@ -336,7 +343,7 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 	cur.mu.RUnlock()
 
 	curBlocked := isBlocked(curRL, params)
-	curWater := waterScore(curRL, params)
+	curWater := WaterScore(curRL, params)
 
 	// Find best non-blocked alternative by water-fill score.
 	bestIdx := -1
@@ -349,7 +356,7 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 		rl := a.rateLimit
 		a.mu.RUnlock()
 		if !isBlocked(rl, params) {
-			ws := waterScore(rl, params)
+			ws := WaterScore(rl, params)
 			if ws < bestWater {
 				bestWater = ws
 				bestIdx = i
