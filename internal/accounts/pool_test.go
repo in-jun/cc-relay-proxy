@@ -234,10 +234,94 @@ func TestPoolParamsAndSetParams(t *testing.T) {
 	if got.SwitchThreshold5h != 0.75 {
 		t.Errorf("want 0.75 initial, got %f", got.SwitchThreshold5h)
 	}
-	p.SetParams(Params{SwitchThreshold5h: 0.50, HardBlock7d: 0.90, Weight5h: 0.60, Weight7d: 0.40})
+	if got.ProactiveHysteresis != 0.0 {
+		t.Errorf("N=2: want ProactiveHysteresis=0.0, got %f", got.ProactiveHysteresis)
+	}
+	p.SetParams(Params{SwitchThreshold5h: 0.50, HardBlock7d: 0.90, Weight5h: 0.60, Weight7d: 0.40, ProactiveHysteresis: 0.10})
 	got = p.Params()
 	if got.SwitchThreshold5h != 0.50 {
 		t.Errorf("want 0.50 after set, got %f", got.SwitchThreshold5h)
+	}
+	if got.ProactiveHysteresis != 0.10 {
+		t.Errorf("want ProactiveHysteresis=0.10 after set, got %f", got.ProactiveHysteresis)
+	}
+}
+
+func TestSelectBestProactiveSwitches(t *testing.T) {
+	// N=3 → ProactiveHysteresis=0.20 by default.
+	// acct1 active: water=0.70; acct2: water=0.40 → 0.40 < 0.70*(1-0.20)=0.56 → proactive switch.
+	p := makePool(3)
+	params := p.Params()
+	// acct1: 5h=0.70*threshold, 7d=0 → waterScore = max(0.70,0) = 0.70
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.70 * params.SwitchThreshold5h}
+	// acct2: 5h=0.40*threshold, 7d=0 → waterScore = 0.40
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.40 * params.SwitchThreshold5h}
+	// acct3: water=0.60 (worse than acct2, should not be chosen)
+	p.accounts[2].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.60 * params.SwitchThreshold5h}
+
+	name, prevName, switched, reason := p.SelectBest()
+	if !switched {
+		t.Error("should proactively switch to less-loaded account")
+	}
+	if name != "acct2" {
+		t.Errorf("want acct2 (lowest water), got %s", name)
+	}
+	if prevName != "acct1" {
+		t.Errorf("prevName should be acct1, got %s", prevName)
+	}
+	if !strings.Contains(reason, "proactive") {
+		t.Errorf("reason should contain 'proactive', got %q", reason)
+	}
+}
+
+func TestSelectBestProactiveNoSwitchInsideHysteresis(t *testing.T) {
+	// acct2 water is only slightly better — within hysteresis band → no switch.
+	p := makePool(3)
+	params := p.Params()
+	// acct1 water=0.70, acct2 water=0.65 → 0.65 > 0.70*(1-0.20)=0.56 → no switch
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.70 * params.SwitchThreshold5h}
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.65 * params.SwitchThreshold5h}
+	p.accounts[2].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.68 * params.SwitchThreshold5h}
+
+	_, _, switched, _ := p.SelectBest()
+	if switched {
+		t.Error("should not switch when alternative is within hysteresis band")
+	}
+}
+
+func TestSelectBestProactiveDisabledForTwoAccounts(t *testing.T) {
+	// N=2 → ProactiveHysteresis=0.0 → proactive switching disabled.
+	p := makePool(2)
+	params := p.Params()
+	if params.ProactiveHysteresis != 0.0 {
+		t.Fatalf("N=2 should have ProactiveHysteresis=0.0, got %f", params.ProactiveHysteresis)
+	}
+	// acct2 is much less loaded — but proactive is disabled
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.70 * params.SwitchThreshold5h}
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.01 * params.SwitchThreshold5h}
+
+	_, _, switched, _ := p.SelectBest()
+	if switched {
+		t.Error("N=2 should not proactively switch (ProactiveHysteresis=0)")
+	}
+}
+
+func TestWaterScore(t *testing.T) {
+	const eps = 1e-9
+	params := Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90}
+	// 5h dominates: max(0.64/0.80, 0.27/0.90) = max(0.80, 0.30) = 0.80
+	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27}
+	ws := waterScore(rl, params)
+	want5h := 0.64 / 0.80
+	if ws < want5h-eps || ws > want5h+eps {
+		t.Errorf("5h-dominant: want %.6f, got %.6f", want5h, ws)
+	}
+	// 7d dominates: max(0.10/0.80, 0.81/0.90) = max(0.125, 0.90) = 0.90
+	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81}
+	ws2 := waterScore(rl2, params)
+	want7d := 0.81 / 0.90
+	if ws2 < want7d-eps || ws2 > want7d+eps {
+		t.Errorf("7d-dominant: want %.6f, got %.6f", want7d, ws2)
 	}
 }
 
@@ -460,13 +544,22 @@ func TestDefaultParams(t *testing.T) {
 	if p2.SwitchThreshold5h != 0.75 {
 		t.Errorf("N=2: want 0.75, got %f", p2.SwitchThreshold5h)
 	}
+	if p2.ProactiveHysteresis != 0.0 {
+		t.Errorf("N=2: want ProactiveHysteresis=0.0, got %f", p2.ProactiveHysteresis)
+	}
 	p4 := defaultParams(4)
 	if p4.SwitchThreshold5h != 0.80 {
 		t.Errorf("N=4: want 0.80, got %f", p4.SwitchThreshold5h)
 	}
+	if p4.ProactiveHysteresis != 0.20 {
+		t.Errorf("N=4: want ProactiveHysteresis=0.20, got %f", p4.ProactiveHysteresis)
+	}
 	p5 := defaultParams(5)
 	if p5.SwitchThreshold5h != 0.85 {
 		t.Errorf("N=5: want 0.85, got %f", p5.SwitchThreshold5h)
+	}
+	if p5.ProactiveHysteresis != 0.15 {
+		t.Errorf("N=5: want ProactiveHysteresis=0.15, got %f", p5.ProactiveHysteresis)
 	}
 }
 

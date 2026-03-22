@@ -109,6 +109,7 @@ func (t *Tuner) analyze() {
 		total429          int
 		prematureSwitches int
 		totalSwitches     int
+		proactiveSwitches int
 		allBlockedCount   int
 		recoveryTimes     []float64
 		windowHours       = 24.0
@@ -140,10 +141,14 @@ func (t *Tuner) analyze() {
 			totalSwitches++
 			reason, _ := data["reason"].(string)
 			fiveHourBefore, _ := data["fiveHour_before"].(float64)
-			// Premature: switched before reaching 90% of the threshold
-			earlyThreshold := params.SwitchThreshold5h * 0.90
-			if strings.HasPrefix(reason, "threshold") && fiveHourBefore < earlyThreshold {
-				prematureSwitches++
+			if strings.HasPrefix(reason, "proactive") {
+				proactiveSwitches++
+			} else {
+				// Premature: reactive switch before reaching 90% of the threshold
+				earlyThreshold := params.SwitchThreshold5h * 0.90
+				if strings.HasPrefix(reason, "threshold") && fiveHourBefore < earlyThreshold {
+					prematureSwitches++
+				}
 			}
 
 		case "rate_limit_update":
@@ -232,6 +237,20 @@ func (t *Tuner) analyze() {
 		}
 	}
 
+	// Rule 5a: proactive switches are very frequent with no 429s → increase
+	// hysteresis so we don't over-rotate between accounts.
+	proactiveRate := float64(proactiveSwitches) / windowHours
+	if proactiveRate > 5.0 && rate429 < 0.1 {
+		p.ProactiveHysteresis = clamp(p.ProactiveHysteresis+0.05, 0.0, 0.40)
+		reasons = append(reasons, fmt.Sprintf("proactive switches %.1f/hr high, 429 rate low → hysteresis +0.05", proactiveRate))
+	}
+
+	// Rule 5b: 429 rate is elevated → decrease hysteresis to switch sooner.
+	if rate429 > 0.5 && p.ProactiveHysteresis > 0 {
+		p.ProactiveHysteresis = clamp(p.ProactiveHysteresis-0.05, 0.0, 0.40)
+		reasons = append(reasons, fmt.Sprintf("429 rate %.2f/hr elevated → hysteresis -0.05", rate429))
+	}
+
 	// Rule 5: all-blocked events > 3 → warning
 	if allBlockedCount > 3 {
 		t.log.Log("warning", "", map[string]any{
@@ -294,15 +313,17 @@ func paramsEqual(a, b accounts.Params) bool {
 	return a.SwitchThreshold5h == b.SwitchThreshold5h &&
 		a.HardBlock7d == b.HardBlock7d &&
 		a.Weight5h == b.Weight5h &&
-		a.Weight7d == b.Weight7d
+		a.Weight7d == b.Weight7d &&
+		a.ProactiveHysteresis == b.ProactiveHysteresis
 }
 
 func paramsMap(p accounts.Params) map[string]any {
 	return map[string]any{
-		"switchThreshold5h": p.SwitchThreshold5h,
-		"hardBlock7d":       p.HardBlock7d,
-		"weight5h":          p.Weight5h,
-		"weight7d":          p.Weight7d,
+		"switchThreshold5h":   p.SwitchThreshold5h,
+		"hardBlock7d":         p.HardBlock7d,
+		"weight5h":            p.Weight5h,
+		"weight7d":            p.Weight7d,
+		"proactiveHysteresis": p.ProactiveHysteresis,
 	}
 }
 
