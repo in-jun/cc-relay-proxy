@@ -354,7 +354,7 @@ func TestProxyReturns502WhenContextCancelledBeforeRequest(t *testing.T) {
 	pool := accounts.NewPool(accts)
 	l := newTestLogger(t)
 	// Point at a non-listening address so the connection fails
-	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	srv := NewWithTarget(pool, l, AnthropicTarget)
 
 	// Pre-cancel the context so the HTTP call fails immediately
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
@@ -694,7 +694,7 @@ func TestPingAccountTokenError(t *testing.T) {
 	// Covers lines 150-153 (token error path in pingAccount).
 	pool := newSeededTestPool(t)
 	l := newTestLogger(t)
-	srv := NewWithTarget(pool, l, "http://127.0.0.1:1") // won't be reached
+	srv := NewWithTarget(pool, l, AnthropicTarget) // won't be reached
 	p := NewPinger(pool, l, srv)
 
 	// "ghost" is not in the pool → TokenFor returns "account not found" error.
@@ -719,7 +719,7 @@ func TestStartupPing(t *testing.T) {
 	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1"}]`)
 	pool := accounts.NewPool(accts)
 	l := newTestLogger(t)
-	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	srv := NewWithTarget(pool, l, AnthropicTarget)
 	p := NewPinger(pool, l, srv)
 
 	p.StartupPing(context.Background())
@@ -731,7 +731,7 @@ func TestRunContextCancelled(t *testing.T) {
 	// Run exits immediately when context is cancelled (covers ctx.Done() branch).
 	pool := newSeededTestPool(t)
 	l := newTestLogger(t)
-	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	srv := NewWithTarget(pool, l, AnthropicTarget)
 	p := NewPinger(pool, l, srv)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -777,7 +777,7 @@ func TestCheckAndPingResets(t *testing.T) {
 	})
 
 	l := newTestLogger(t)
-	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	srv := NewWithTarget(pool, l, AnthropicTarget)
 	p := NewPinger(pool, l, srv)
 
 	scheduled := map[string]time.Time{}
@@ -802,7 +802,7 @@ func TestPingAccountPingError(t *testing.T) {
 	//   - DoUpstreamRequest fails → log error, return (lines 160-163 covered)
 	pool := newSeededTestPool(t) // tokens are pre-seeded, Ensure returns immediately
 	l := newTestLogger(t)
-	srv := NewWithTarget(pool, l, "http://127.0.0.1:1") // not reached
+	srv := NewWithTarget(pool, l, AnthropicTarget) // not reached
 	p := NewPinger(pool, l, srv)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -825,7 +825,7 @@ func TestRunPingTickerFires(t *testing.T) {
 
 	pool := newSeededTestPool(t)
 	l := newTestLogger(t)
-	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	srv := NewWithTarget(pool, l, AnthropicTarget)
 	p := NewPinger(pool, l, srv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -854,7 +854,7 @@ func TestRunResetTickerFires(t *testing.T) {
 
 	pool := newSeededTestPool(t)
 	l := newTestLogger(t)
-	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	srv := NewWithTarget(pool, l, AnthropicTarget)
 	p := NewPinger(pool, l, srv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -888,7 +888,7 @@ func TestCheckAndPingResetsContinuePaths(t *testing.T) {
 	})
 
 	l := newTestLogger(t)
-	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	srv := NewWithTarget(pool, l, AnthropicTarget)
 	p := NewPinger(pool, l, srv)
 
 	scheduled := map[string]time.Time{}
@@ -988,7 +988,7 @@ func TestPingAccountSuccess(t *testing.T) {
 	// Covers lines 165-176 (successful ping path including UpdateRateLimit and log).
 	pool := newSeededTestPool(t)
 	l := newTestLogger(t)
-	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	srv := NewWithTarget(pool, l, AnthropicTarget)
 	p := NewPinger(pool, l, srv)
 
 	// Replace http.DefaultClient with a mock that returns a 200 with rate-limit headers.
@@ -1106,5 +1106,38 @@ func TestProxyInvalidateToken(t *testing.T) {
 	}
 	if tok2 != "fresh_tok" {
 		t.Errorf("want fresh_tok, got %q", tok2)
+	}
+}
+
+func TestPingAccountHTTPError(t *testing.T) {
+	// pingAccount with a valid token and a cancelled context so DoUpstreamRequest fails.
+	// Covers the ping_error log path in pinger.go.
+	pool := newSeededTestPool(t)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, AnthropicTarget)
+	p := NewPinger(pool, l, srv)
+
+	// Cancel the context so that DoUpstreamRequest fails immediately.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// a1 has a seeded valid token so TokenFor succeeds, then DoUpstreamRequest
+	// fails because the context is already cancelled.
+	p.pingAccount(ctx, "a1")
+	// No assertion needed — we're verifying the error path runs without panic.
+}
+
+func TestDoUpstreamRequestCancelledContext(t *testing.T) {
+	// DoUpstreamRequest with a cancelled context returns an error immediately.
+	pool := newSeededTestPool(t)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, AnthropicTarget)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before calling
+
+	_, err := srv.DoUpstreamRequest(ctx, "tok", "/v1/messages", []byte(`{}`))
+	if err == nil {
+		t.Fatal("expected error from DoUpstreamRequest with cancelled context")
 	}
 }
