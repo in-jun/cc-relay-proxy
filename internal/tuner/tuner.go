@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -134,7 +135,7 @@ func (t *Tuner) analyze() {
 			fiveHourBefore, _ := data["fiveHour_before"].(float64)
 			// Premature: switched before reaching 90% of the threshold
 			earlyThreshold := params.SwitchThreshold5h * 0.90
-			if reason == "threshold" && fiveHourBefore < earlyThreshold {
+			if strings.HasPrefix(reason, "threshold") && fiveHourBefore < earlyThreshold {
 				prematureSwitches++
 			}
 

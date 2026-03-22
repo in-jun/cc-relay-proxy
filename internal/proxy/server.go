@@ -106,7 +106,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"fiveHour_before": prevRL.FiveHourUtil,
 		})
 		// Ping the previous account in background to measure its recovery speed
-		go s.pinger.PingAfterSwitch(s.bgCtx, prevAccount)
+		s.pinger.PingAfterSwitch(s.bgCtx, prevAccount)
 	}
 
 	maxAttempts := len(s.pool.Accounts()) + 2
@@ -158,12 +158,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 					"to":     nextName,
 					"reason": reason2,
 				})
+				actualRL := s.pool.RateLimitFor(prev429Account)
 				s.log.Log("429_received", prev429Account, map[string]any{
 					"action":   "switch",
-					"fiveHour": rl.FiveHourUtil,
+					"fiveHour": actualRL.FiveHourUtil,
 				})
 				// Ping previous account in background to measure recovery speed
-				go s.pinger.PingAfterSwitch(s.bgCtx, prev429Account)
+				s.pinger.PingAfterSwitch(s.bgCtx, prev429Account)
 				accountName = nextName
 				continue
 			}
@@ -192,9 +193,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Forward 429
+			fwdRL := s.pool.RateLimitFor(accountName)
 			s.log.Log("429_received", accountName, map[string]any{
 				"action":   "forward",
-				"fiveHour": rl.FiveHourUtil,
+				"fiveHour": fwdRL.FiveHourUtil,
 			})
 			copyHeaders(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
