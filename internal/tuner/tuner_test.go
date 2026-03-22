@@ -297,6 +297,19 @@ func TestRunWithZeroIntervalDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestRunTickerFires(t *testing.T) {
+	// Run with a 1ms interval lets the ticker fire before ctx is cancelled.
+	// analyze() exits early (< 100 events) but the ticker branch is covered.
+	pool := makeTestPool()
+	l, cleanup := makeTestLogger(t)
+	defer cleanup()
+
+	tu := New(pool, l, time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	tu.Run(ctx) // blocks until ctx expires; ticker fires multiple times
+}
+
 func TestClamp(t *testing.T) {
 	if clamp(1.5, 0, 1) != 1 {
 		t.Error("clamp max failed")

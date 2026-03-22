@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -405,6 +406,51 @@ func TestParseRateLimitHeadersPartial(t *testing.T) {
 	}
 	if !rl.FiveHourReset.IsZero() {
 		t.Error("FiveHourReset should be zero when header absent")
+	}
+}
+
+func TestParseAccountsInvalidJSON(t *testing.T) {
+	_, err := ParseAccounts("not-valid-json")
+	if err == nil {
+		t.Error("expected error for invalid JSON input")
+	}
+}
+
+func TestSetRefreshCallbackInvoked(t *testing.T) {
+	// Start a fake token endpoint that returns a valid token.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "at_fresh",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	orig := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = orig }()
+
+	// Non-seeded pool — tokens need a refresh on first Ensure.
+	p := makePool(2)
+
+	var gotName string
+	var gotMins int
+	p.SetRefreshCallback(func(name string, mins int) {
+		gotName = name
+		gotMins = mins
+	})
+
+	// ActiveToken triggers Ensure → refresh → callback.
+	_, err := p.ActiveToken(context.Background())
+	if err != nil {
+		t.Fatalf("ActiveToken: %v", err)
+	}
+	if gotName != "acct1" {
+		t.Errorf("callback name: want acct1, got %q", gotName)
+	}
+	if gotMins != 60 {
+		t.Errorf("callback mins: want 60, got %d", gotMins)
 	}
 }
 
