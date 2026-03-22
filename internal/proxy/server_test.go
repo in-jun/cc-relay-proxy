@@ -922,3 +922,76 @@ func TestProxyLoopExhausted502(t *testing.T) {
 		t.Errorf("want 502 when loop exhausted after holds, got %d", w.Code)
 	}
 }
+
+func TestProxySwitchedOnInitialSelect(t *testing.T) {
+	// When the active account (a1) is already rejected before the first request,
+	// SelectBest() at the top of handleProxy returns switched=true.
+	// This covers the block at server.go:100-110 (TotalSwitches.Add, log account_switched).
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	accts, _ := accounts.ParseAccounts(`[
+		{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999},
+		{"name":"a2","refreshToken":"rt2","accessToken":"tok2","expiresAt":9999999999999}
+	]`)
+	pool := accounts.NewPool(accts)
+	// Pre-reject a1 so SelectBest immediately picks a2 (switched=true).
+	pool.UpdateRateLimit("a1", accounts.RateLimit{
+		Status:       "rejected",
+		FiveHourUtil: 1.0,
+		FiveHourReset: time.Now().Add(5 * time.Minute),
+	})
+
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200 after initial switch, got %d", w.Code)
+	}
+}
+
+// roundTripFunc is a test helper implementing http.RoundTripper.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestPingAccountSuccess(t *testing.T) {
+	// pingAccount with seeded token + mock HTTP client that returns rate-limit headers.
+	// Covers lines 165-176 (successful ping path including UpdateRateLimit and log).
+	pool := newSeededTestPool(t)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	p := NewPinger(pool, l, srv)
+
+	// Replace http.DefaultClient with a mock that returns a 200 with rate-limit headers.
+	origClient := http.DefaultClient
+	http.DefaultClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			header := http.Header{}
+			header.Set("anthropic-ratelimit-unified-status", "allowed")
+			header.Set("anthropic-ratelimit-unified-5h-utilization", "0.23")
+			header.Set("anthropic-ratelimit-unified-7d-utilization", "0.07")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     header,
+				Body:       http.NoBody,
+			}, nil
+		}),
+	}
+	defer func() { http.DefaultClient = origClient }()
+
+	p.pingAccount(context.Background(), "a1")
+	// Verify rate limit was recorded (UpdateRateLimit stores LastSeen).
+	rl := pool.RateLimitFor("a1")
+	if rl.Status != "allowed" {
+		t.Errorf("want status=allowed after ping, got %q", rl.Status)
+	}
+}
