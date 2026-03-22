@@ -155,6 +155,16 @@ func TestParseAccountsEmpty(t *testing.T) {
 	}
 }
 
+func TestParseAccountsMissingRefreshToken(t *testing.T) {
+	raw, _ := json.Marshal([]AccountConfig{
+		{Name: "bad", RefreshToken: ""},
+	})
+	_, err := ParseAccounts(string(raw))
+	if err == nil {
+		t.Error("expected error for missing refreshToken")
+	}
+}
+
 func TestPoolLen(t *testing.T) {
 	p := makePool(3)
 	if p.Len() != 3 {

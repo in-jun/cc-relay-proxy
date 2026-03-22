@@ -69,6 +69,9 @@ func ParseAccounts(raw string) ([]*Account, error) {
 		if c.Name == "" {
 			c.Name = fmt.Sprintf("acct%d", i+1)
 		}
+		if c.RefreshToken == "" {
+			return nil, fmt.Errorf("CC_ACCOUNTS[%d] (%s): refreshToken is required", i, c.Name)
+		}
 		var tok *Token
 		if c.AccessToken != "" && c.ExpiresAt > 0 {
 			tok = newTokenSeeded(c.RefreshToken, c.AccessToken, time.UnixMilli(c.ExpiresAt))
