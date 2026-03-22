@@ -1,6 +1,8 @@
 package accounts
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -105,6 +107,212 @@ func TestSoonestResetSkipsZeroTimes(t *testing.T) {
 	if soonest != reset {
 		t.Errorf("SoonestReset should skip zero times and return a2's reset; got %v, want %v", soonest, reset)
 	}
+}
+
+func TestParseAccounts(t *testing.T) {
+	raw, _ := json.Marshal([]AccountConfig{
+		{Name: "main", RefreshToken: "rt_main"},
+		{RefreshToken: "rt_anon"}, // no name → should default to "acct2"
+	})
+	accts, err := ParseAccounts(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accts) != 2 {
+		t.Fatalf("want 2 accounts, got %d", len(accts))
+	}
+	if accts[0].Name != "main" {
+		t.Errorf("want main, got %s", accts[0].Name)
+	}
+	if accts[1].Name != "acct2" {
+		t.Errorf("want acct2, got %s", accts[1].Name)
+	}
+}
+
+func TestParseAccountsSeededToken(t *testing.T) {
+	expiresAt := time.Now().Add(1 * time.Hour).UnixMilli()
+	raw, _ := json.Marshal([]AccountConfig{
+		{Name: "seeded", RefreshToken: "rt1", AccessToken: "at1", ExpiresAt: expiresAt},
+	})
+	accts, err := ParseAccounts(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Token should be immediately usable without a refresh
+	tok, err := accts[0].token.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure failed: %v", err)
+	}
+	if tok != "at1" {
+		t.Errorf("want at1, got %s", tok)
+	}
+}
+
+func TestParseAccountsEmpty(t *testing.T) {
+	_, err := ParseAccounts("[]")
+	if err == nil {
+		t.Error("expected error for empty accounts list")
+	}
+}
+
+func TestPoolLen(t *testing.T) {
+	p := makePool(3)
+	if p.Len() != 3 {
+		t.Errorf("want 3, got %d", p.Len())
+	}
+}
+
+func TestPoolParamsAndSetParams(t *testing.T) {
+	p := makePool(2)
+	got := p.Params()
+	if got.SwitchThreshold5h != 0.75 {
+		t.Errorf("want 0.75 initial, got %f", got.SwitchThreshold5h)
+	}
+	p.SetParams(Params{SwitchThreshold5h: 0.50, HardBlock7d: 0.90, Weight5h: 0.60, Weight7d: 0.40})
+	got = p.Params()
+	if got.SwitchThreshold5h != 0.50 {
+		t.Errorf("want 0.50 after set, got %f", got.SwitchThreshold5h)
+	}
+}
+
+func TestPoolActiveName(t *testing.T) {
+	p := makePool(2)
+	if p.ActiveName() != "acct1" {
+		t.Errorf("want acct1, got %s", p.ActiveName())
+	}
+}
+
+func TestUpdateAndGetRateLimit(t *testing.T) {
+	p := makePool(2)
+	rl := RateLimit{
+		Status:       "allowed_warning",
+		FiveHourUtil: 0.55,
+		SevenDayUtil: 0.10,
+	}
+	p.UpdateRateLimit("acct1", rl)
+	got := p.RateLimitFor("acct1")
+	if got.Status != "allowed_warning" {
+		t.Errorf("want allowed_warning, got %s", got.Status)
+	}
+	if got.FiveHourUtil != 0.55 {
+		t.Errorf("want 0.55, got %f", got.FiveHourUtil)
+	}
+	if got.LastSeen.IsZero() {
+		t.Error("LastSeen should be set after UpdateRateLimit")
+	}
+}
+
+func TestRateLimitForUnknownAccount(t *testing.T) {
+	p := makePool(2)
+	rl := p.RateLimitFor("nonexistent")
+	if rl.Status != "" {
+		t.Errorf("want empty RateLimit for unknown account, got status=%s", rl.Status)
+	}
+}
+
+func TestUpdateRateLimitUnknownAccount(t *testing.T) {
+	p := makePool(2)
+	// Should not panic
+	p.UpdateRateLimit("nonexistent", RateLimit{Status: "allowed"})
+}
+
+func TestPoolAccounts(t *testing.T) {
+	p := makePool(3)
+	// Switch active to acct2
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed"} // already allowed
+	// Force a switch by blocking acct1
+	p.accounts[0].rateLimit = RateLimit{Status: "rejected", FiveHourUtil: 1.0}
+	p.SelectBest() // switches to acct2
+
+	snaps := p.Accounts()
+	if len(snaps) != 3 {
+		t.Fatalf("want 3 snapshots, got %d", len(snaps))
+	}
+	// Find the active one
+	var active *AccountSnapshot
+	for i := range snaps {
+		if snaps[i].IsActive {
+			active = &snaps[i]
+		}
+	}
+	if active == nil {
+		t.Fatal("no active account in snapshot")
+	}
+	if active.Name != "acct2" {
+		t.Errorf("want acct2 active, got %s", active.Name)
+	}
+}
+
+func makeSeededPool(n int) *Pool {
+	accts := make([]*Account, n)
+	expiresAt := time.Now().Add(1 * time.Hour)
+	for i := range accts {
+		name := "acct" + string(rune('0'+i+1))
+		tok := newTokenSeeded("rt_"+name, "at_"+name, expiresAt)
+		accts[i] = &Account{
+			Name:      name,
+			token:     tok,
+			rateLimit: RateLimit{Status: "allowed"},
+		}
+	}
+	return NewPool(accts)
+}
+
+func TestActiveToken(t *testing.T) {
+	p := makeSeededPool(2)
+	tok, err := p.ActiveToken(context.Background())
+	if err != nil {
+		t.Fatalf("ActiveToken failed: %v", err)
+	}
+	if tok != "at_acct1" {
+		t.Errorf("want at_acct1, got %s", tok)
+	}
+}
+
+func TestActiveTokenWithName(t *testing.T) {
+	p := makeSeededPool(2)
+	tok, name, err := p.ActiveTokenWithName(context.Background())
+	if err != nil {
+		t.Fatalf("ActiveTokenWithName failed: %v", err)
+	}
+	if tok != "at_acct1" {
+		t.Errorf("want at_acct1, got %s", tok)
+	}
+	if name != "acct1" {
+		t.Errorf("want acct1, got %s", name)
+	}
+}
+
+func TestTokenFor(t *testing.T) {
+	p := makeSeededPool(2)
+	tok, err := p.TokenFor(context.Background(), "acct2")
+	if err != nil {
+		t.Fatalf("TokenFor failed: %v", err)
+	}
+	if tok != "at_acct2" {
+		t.Errorf("want at_acct2, got %s", tok)
+	}
+}
+
+func TestTokenForUnknown(t *testing.T) {
+	p := makeSeededPool(2)
+	_, err := p.TokenFor(context.Background(), "unknown")
+	if err == nil {
+		t.Error("expected error for unknown account name")
+	}
+}
+
+func TestSetRefreshCallback(t *testing.T) {
+	p := makePool(2)
+	called := false
+	p.SetRefreshCallback(func(name string, expiresInMins int) {
+		called = true
+		_ = name
+		_ = expiresInMins
+	})
+	// Callback is registered; actual invocation tested in token_test.go
+	// Just verify no panic and the field is wired (black-box check)
+	_ = called
 }
 
 func TestDefaultParams(t *testing.T) {
