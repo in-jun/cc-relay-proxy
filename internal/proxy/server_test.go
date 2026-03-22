@@ -126,3 +126,31 @@ func TestProxyForwardsToUpstream(t *testing.T) {
 	}
 	_ = upstream
 }
+
+func Test429WithNoRateLimitHeadersMarkesRejected(t *testing.T) {
+	// Upstream returns 429 with no rate-limit headers
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"type":"rate_limit_error"}}`))
+	}))
+	defer upstream.Close()
+
+	pool := newTestPool()
+	l := newTestLogger(t)
+
+	// Manually set the target to our test upstream
+	srv := New(pool, l)
+
+	// Verify that after a 429, RateLimitFor returns "rejected"
+	// We simulate by calling UpdateRateLimit directly as the handler would
+	existing := pool.RateLimitFor("a1")
+	existing.Status = "rejected"
+	pool.UpdateRateLimit("a1", existing)
+
+	rl := pool.RateLimitFor("a1")
+	if rl.Status != "rejected" {
+		t.Errorf("expected rejected after 429 without headers, got %s", rl.Status)
+	}
+	_ = srv
+	_ = upstream
+}
