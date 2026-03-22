@@ -20,7 +20,7 @@ func makePool(n int) *Pool {
 
 func TestSelectBestKeepsCurrent(t *testing.T) {
 	p := makePool(2)
-	name, switched, _ := p.SelectBest()
+	name, _, switched, _ := p.SelectBest()
 	if switched {
 		t.Error("should not switch when current is fine")
 	}
@@ -37,7 +37,7 @@ func TestSelectBestSwitchesOnThreshold(t *testing.T) {
 		FiveHourUtil: 0.90, // over 0.75 threshold for 2 accounts
 	}
 
-	name, switched, reason := p.SelectBest()
+	name, prevName, switched, reason := p.SelectBest()
 	if !switched {
 		t.Error("should switch when active is over threshold")
 	}
@@ -46,6 +46,9 @@ func TestSelectBestSwitchesOnThreshold(t *testing.T) {
 	}
 	if reason == "" {
 		t.Error("switch reason should not be empty")
+	}
+	if prevName != "acct1" {
+		t.Errorf("prevName should be acct1 (account before switch), got %s", prevName)
 	}
 }
 
@@ -59,7 +62,7 @@ func TestSelectBestAllRejected(t *testing.T) {
 	}
 
 	// Should stay on current account, no switch
-	_, switched, _ := p.SelectBest()
+	_, _, switched, _ := p.SelectBest()
 	if switched {
 		t.Error("should not switch when all are rejected")
 	}
