@@ -299,6 +299,45 @@ func TestFormatAgoSimple(t *testing.T) {
 	}
 }
 
+func TestProxy429ForwardedWhenAllInCaution(t *testing.T) {
+	// Upstream returns 429 with rate-limit headers showing high (but not rejected) utilization.
+	// Both accounts will be "over threshold" but not rejected → all_in_caution → forward 429.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return 429 with rate-limit headers showing "allowed_warning" at 90% util
+		w.Header().Set("anthropic-ratelimit-unified-status", "allowed_warning")
+		w.Header().Set("anthropic-ratelimit-unified-5h-utilization", "0.90")
+		w.Header().Set("anthropic-ratelimit-unified-5h-reset", "9999999999")
+		w.Header().Set("anthropic-ratelimit-unified-7d-utilization", "0.50")
+		w.Header().Set("anthropic-ratelimit-unified-7d-reset", "9999999999")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"type":"rate_limit_error"}}`))
+	}))
+	defer upstream.Close()
+
+	accts, _ := accounts.ParseAccounts(`[
+		{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999},
+		{"name":"a2","refreshToken":"rt2","accessToken":"tok2","expiresAt":9999999999999}
+	]`)
+	pool := accounts.NewPool(accts)
+
+	// Pre-seed both accounts as over threshold (allowed_warning) but not rejected.
+	// This makes Priority 3 (caution fallback) pick the current account (no switch).
+	pool.UpdateRateLimit("a1", accounts.RateLimit{Status: "allowed_warning", FiveHourUtil: 0.80})
+	pool.UpdateRateLimit("a2", accounts.RateLimit{Status: "allowed_warning", FiveHourUtil: 0.82})
+
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("want 429 forwarded when all in caution, got %d", w.Code)
+	}
+}
+
 func TestProxyReturns502WhenContextCancelledBeforeRequest(t *testing.T) {
 	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999}]`)
 	pool := accounts.NewPool(accts)
