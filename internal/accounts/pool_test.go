@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -495,4 +496,137 @@ func TestInvalidateToken(t *testing.T) {
 
 	// Unknown account name → no-op.
 	pool.InvalidateToken("nonexistent")
+}
+
+func TestParseAccountsFile(t *testing.T) {
+	f, err := os.CreateTemp("", "cc-accts-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`[{"name":"a1","refreshToken":"rt1"}]`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	accts, err := ParseAccountsFile(f.Name())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(accts) != 1 || accts[0].Name != "a1" {
+		t.Fatalf("unexpected accounts: %+v", accts)
+	}
+}
+
+func TestParseAccountsFileMissing(t *testing.T) {
+	_, err := ParseAccountsFile("/tmp/does-not-exist-cc-pool-test.json")
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestPersistAccounts(t *testing.T) {
+	f, err := os.CreateTemp("", "cc-persist-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	defer os.Remove(f.Name())
+
+	accts, _ := ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999}]`)
+	pool := NewPool(accts)
+
+	if err := pool.PersistAccounts(f.Name()); err != nil {
+		t.Fatalf("PersistAccounts: %v", err)
+	}
+
+	// Read back and verify
+	reloaded, err := ParseAccountsFile(f.Name())
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if len(reloaded) != 1 || reloaded[0].Name != "a1" {
+		t.Fatalf("unexpected reloaded accounts: %+v", reloaded)
+	}
+}
+
+func TestPersistAccountsBadPath(t *testing.T) {
+	accts, _ := ParseAccounts(`[{"name":"a1","refreshToken":"rt1"}]`)
+	pool := NewPool(accts)
+	// Directory that doesn't exist — CreateTemp should fail
+	err := pool.PersistAccounts("/tmp/nonexistent-dir-cc/accounts.json")
+	if err == nil {
+		t.Fatal("expected error for bad path")
+	}
+}
+
+func TestWatchRotations(t *testing.T) {
+	f, err := os.CreateTemp("", "cc-watch-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`[{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999}]`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	accts, _ := ParseAccountsFile(f.Name())
+	pool := NewPool(accts)
+	pool.WatchRotations(f.Name())
+
+	// Simulate a rotation by firing the callback on the token directly
+	for _, a := range pool.accounts {
+		a.mu.RLock()
+		tok := a.token
+		a.mu.RUnlock()
+		tok.mu.RLock()
+		cb := tok.onRotate
+		tok.mu.RUnlock()
+		if cb == nil {
+			t.Fatal("WatchRotations did not set rotate callback")
+		}
+		// Fire it with updated credentials
+		cb("rt2", "tok2", time.Now().Add(time.Hour))
+	}
+
+	// File should now contain the updated credentials
+	reloaded, err := ParseAccountsFile(f.Name())
+	if err != nil {
+		t.Fatalf("reload after rotation: %v", err)
+	}
+	if len(reloaded) != 1 {
+		t.Fatalf("unexpected account count: %d", len(reloaded))
+	}
+}
+
+func TestWatchRotationsCallbackError(t *testing.T) {
+	// Create a temp dir and place the accounts file inside it
+	dir, err := os.MkdirTemp("", "cc-watch-err-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	path := dir + "/accounts.json"
+	if err := os.WriteFile(path, []byte(`[{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999}]`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	accts, _ := ParseAccountsFile(path)
+	pool := NewPool(accts)
+	pool.WatchRotations(path)
+
+	// Remove the directory so PersistAccounts fails when the callback fires
+	os.RemoveAll(dir)
+
+	// Fire the callback — PersistAccounts will fail, log.Printf branch executes
+	for _, a := range pool.accounts {
+		a.mu.RLock()
+		tok := a.token
+		a.mu.RUnlock()
+		tok.mu.RLock()
+		cb := tok.onRotate
+		tok.mu.RUnlock()
+		if cb != nil {
+			cb("rt2", "tok2", time.Now().Add(time.Hour))
+		}
+	}
+	// If we reach here without panic, the error path was handled correctly
 }
