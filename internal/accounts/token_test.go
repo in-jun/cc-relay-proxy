@@ -147,6 +147,18 @@ func TestTokenRTR(t *testing.T) {
 	}
 }
 
+func TestExpiresAt(t *testing.T) {
+	tok := &Token{}
+	if !tok.ExpiresAt().IsZero() {
+		t.Error("ExpiresAt should be zero for unrefreshed token")
+	}
+	future := time.Now().Add(1 * time.Hour).Truncate(time.Second)
+	tok.expiresAt = future
+	if tok.ExpiresAt() != future {
+		t.Errorf("ExpiresAt should return stored expiry, got %v", tok.ExpiresAt())
+	}
+}
+
 func TestExpiresIn(t *testing.T) {
 	tok := &Token{}
 	if s := tok.ExpiresIn(); s != "not refreshed" {
