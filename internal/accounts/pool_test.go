@@ -307,21 +307,90 @@ func TestSelectBestProactiveDisabledForTwoAccounts(t *testing.T) {
 }
 
 func TestWaterScore(t *testing.T) {
-	const eps = 1e-9
+	const eps = 1e-6
 	params := Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90}
-	// 5h dominates: max(0.64/0.80, 0.27/0.90) = max(0.80, 0.30) = 0.80
-	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27}
+	// Must be beyond both windows: 5h window=300min, 7d window=168h
+	farFuture := time.Now().Add(200 * time.Hour) // full window remaining → decay=1, no discount
+
+	// 5h dominates (no decay): max(0.64*1/0.80, 0.27*1/0.90) = max(0.80, 0.30) = 0.80
+	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27, FiveHourReset: farFuture, SevenDayReset: farFuture}
 	ws := WaterScore(rl, params)
 	want5h := 0.64 / 0.80
 	if ws < want5h-eps || ws > want5h+eps {
 		t.Errorf("5h-dominant: want %.6f, got %.6f", want5h, ws)
 	}
-	// 7d dominates: max(0.10/0.80, 0.81/0.90) = max(0.125, 0.90) = 0.90
-	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81}
+
+	// 7d dominates (no decay): max(0.10*1/0.80, 0.81*1/0.90) = max(0.125, 0.90) = 0.90
+	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81, FiveHourReset: farFuture, SevenDayReset: farFuture}
 	ws2 := WaterScore(rl2, params)
 	want7d := 0.81 / 0.90
 	if ws2 < want7d-eps || ws2 > want7d+eps {
 		t.Errorf("7d-dominant: want %.6f, got %.6f", want7d, ws2)
+	}
+}
+
+func TestWaterScoreTimeDecay(t *testing.T) {
+	const eps = 1e-6
+	params := Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90}
+
+	// 5h=90%, resets in 30 minutes out of 300-minute window → decay = 30/300 = 0.10
+	// effective_5h = 0.90 * 0.10 / 0.80 = 0.1125
+	// 7d=50%, resets far future → effective_7d = 0.50/0.90 = 0.556
+	// water = max(0.1125, 0.556) = 0.556  (7d dominates despite low absolute value)
+	resetSoon := time.Now().Add(30 * time.Minute)
+	farFuture := time.Now().Add(200 * time.Hour)
+	rl := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.50, FiveHourReset: resetSoon, SevenDayReset: farFuture}
+	ws := WaterScore(rl, params)
+	wantDecayed := 0.50 / 0.90 // 7d term dominates
+	if ws < wantDecayed-eps || ws > wantDecayed+0.01 {
+		t.Errorf("time-decayed 5h: want ~%.6f, got %.6f", wantDecayed, ws)
+	}
+	// Must score lower than the same account with a far reset
+	rlFar := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.50, FiveHourReset: farFuture, SevenDayReset: farFuture}
+	wsFar := WaterScore(rlFar, params)
+	if ws >= wsFar {
+		t.Errorf("near-reset account should score lower: near=%.4f far=%.4f", ws, wsFar)
+	}
+}
+
+func TestWaterScoreZeroReset(t *testing.T) {
+	// Reset already past → decay=0 → effective util=0 → score near 0
+	params := Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90}
+	pastReset := time.Now().Add(-1 * time.Minute)
+	rl := RateLimit{FiveHourUtil: 0.95, SevenDayUtil: 0.95, FiveHourReset: pastReset, SevenDayReset: pastReset}
+	ws := WaterScore(rl, params)
+	if ws > 1e-9 {
+		t.Errorf("past-reset account should score 0, got %.6f", ws)
+	}
+}
+
+func TestIsBlockedNearReset(t *testing.T) {
+	params := Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90}
+
+	// Over threshold but resets in 90 seconds → within 2-minute grace → NOT blocked
+	rl := RateLimit{
+		Status:       "allowed_warning",
+		FiveHourUtil: 0.85,
+		FiveHourReset: time.Now().Add(90 * time.Second),
+	}
+	if isBlocked(rl, params) {
+		t.Error("account over threshold but resetting in 90s should NOT be blocked")
+	}
+
+	// Over threshold, resets in 5 minutes → outside grace → blocked
+	rl2 := RateLimit{
+		Status:       "allowed_warning",
+		FiveHourUtil: 0.85,
+		FiveHourReset: time.Now().Add(5 * time.Minute),
+	}
+	if !isBlocked(rl2, params) {
+		t.Error("account over threshold with 5m to reset should be blocked")
+	}
+
+	// rejected status always blocked regardless of reset time
+	rl3 := RateLimit{Status: "rejected", FiveHourReset: time.Now().Add(30 * time.Second)}
+	if !isBlocked(rl3, params) {
+		t.Error("rejected account should always be blocked")
 	}
 }
 

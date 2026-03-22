@@ -165,10 +165,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		rl, hasRL := accounts.ParseRateLimitHeaders(resp.Header)
 		if hasRL {
 			s.pool.UpdateRateLimit(accountName, rl)
+			params := s.pool.Params()
 			s.log.Log("rate_limit_update", accountName, map[string]any{
-				"fiveHour": rl.FiveHourUtil,
-				"sevenDay": rl.SevenDayUtil,
-				"status":   rl.Status,
+				"fiveHour":      rl.FiveHourUtil,
+				"sevenDay":      rl.SevenDayUtil,
+				"status":        rl.Status,
+				"water":         accounts.WaterScore(rl, params),
+				"5hResetInMins": int(time.Until(rl.FiveHourReset).Minutes()),
+				"7dResetInHrs":  int(time.Until(rl.SevenDayReset).Hours()),
 			})
 		}
 
