@@ -21,11 +21,18 @@ type TuneHistory struct {
 
 // Tuner periodically analyzes logs and adjusts pool parameters.
 type Tuner struct {
-	pool     *accounts.Pool
-	log      *logger.Logger
-	interval time.Duration
-	history  []TuneHistory
+	pool      *accounts.Pool
+	log       *logger.Logger
+	interval  time.Duration
+	history   []TuneHistory
+	lastTuned time.Time
 }
+
+// Interval returns the configured tune interval.
+func (t *Tuner) Interval() time.Duration { return t.interval }
+
+// LastTuned returns when the tuner last ran (zero if never).
+func (t *Tuner) LastTuned() time.Time { return t.lastTuned }
 
 // New creates a Tuner. interval is how often to run analysis.
 func New(pool *accounts.Pool, l *logger.Logger, interval time.Duration) *Tuner {
@@ -33,11 +40,15 @@ func New(pool *accounts.Pool, l *logger.Logger, interval time.Duration) *Tuner {
 		pool:     pool,
 		log:      l,
 		interval: interval,
+		history:  []TuneHistory{}, // non-nil so JSON encodes as [] not null
 	}
 }
 
 // History returns a snapshot of recorded parameter changes.
 func (t *Tuner) History() []TuneHistory {
+	if len(t.history) == 0 {
+		return []TuneHistory{}
+	}
 	return append([]TuneHistory(nil), t.history...)
 }
 
@@ -226,6 +237,7 @@ func (t *Tuner) analyze() {
 	})
 
 	t.pool.SetParams(p)
+	t.lastTuned = time.Now()
 
 	t.history = append(t.history, TuneHistory{
 		Ts:     time.Now().UnixMilli(),

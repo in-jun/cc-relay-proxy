@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -146,20 +147,9 @@ func (t *Token) refresh(ctx context.Context) (string, error) {
 func isPermError(err error) bool {
 	s := err.Error()
 	// invalid_grant = refresh token invalid/consumed; don't hammer the endpoint
-	return contains(s, "invalid_grant") || contains(s, "invalid_client") || contains(s, "401")
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr(s, sub))
-}
-
-func containsStr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, "invalid_grant") ||
+		strings.Contains(s, "invalid_client") ||
+		strings.Contains(s, "status 401")
 }
 
 // ExpiresAt returns when the current access token expires (zero if none).

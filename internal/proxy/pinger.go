@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"time"
@@ -51,6 +52,36 @@ func (p *Pinger) TuneHistory() any {
 		return []any{}
 	}
 	return p.tuner.History()
+}
+
+// TuneInterval returns the configured interval, or zero if no tuner.
+func (p *Pinger) TuneInterval() time.Duration {
+	if p.tuner == nil {
+		return 0
+	}
+	return p.tuner.Interval()
+}
+
+// LastTuned returns when the tuner last ran (zero if never).
+func (p *Pinger) LastTuned() string {
+	if p.tuner == nil {
+		return "never"
+	}
+	lt := p.tuner.LastTuned()
+	if lt.IsZero() {
+		return "never"
+	}
+	return formatAgoSimple(time.Since(lt))
+}
+
+func formatAgoSimple(d time.Duration) string {
+	if d < time.Minute {
+		return "just now"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh ago", int(d.Hours()))
 }
 
 // StartupPing pings all accounts once to establish baseline rate limit state.
