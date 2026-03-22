@@ -113,6 +113,69 @@ func TestIsPermError(t *testing.T) {
 	}
 }
 
+func TestEnsurePermErrorNoRetry(t *testing.T) {
+	// Server returns 400 invalid_grant — should fail immediately (no retry)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_grant","error_description":"refresh token expired"}`))
+	}))
+	defer srv.Close()
+
+	orig := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = orig }()
+
+	tok := newToken("expired_rt")
+	_, err := tok.Ensure(context.Background())
+	if err == nil {
+		t.Fatal("expected error for invalid_grant")
+	}
+	if !isPermError(err) {
+		t.Errorf("expected perm error, got: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("perm error should not retry: want 1 call, got %d", calls)
+	}
+}
+
+func TestEnsureTransientErrorRetries(t *testing.T) {
+	// Server returns 503 twice, then 200 — should retry and succeed
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":"service_unavailable"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "recovered_token",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	orig := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = orig }()
+
+	tok := newToken("rt")
+	got, err := tok.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("expected success after retries, got: %v", err)
+	}
+	if got != "recovered_token" {
+		t.Errorf("want recovered_token, got %s", got)
+	}
+	if calls != 3 {
+		t.Errorf("want 3 calls (2 failures + 1 success), got %d", calls)
+	}
+}
+
 func TestTokenRTR(t *testing.T) {
 	// RTR: if server doesn't return new refresh_token, keep existing one
 	tok := &Token{

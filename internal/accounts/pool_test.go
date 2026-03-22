@@ -97,6 +97,18 @@ func TestParseRateLimitHeaders(t *testing.T) {
 	}
 }
 
+func TestAllRejectedPartial(t *testing.T) {
+	p := makePool(3)
+	// Only one account rejected — AllRejected should return false
+	p.accounts[0].rateLimit = RateLimit{Status: "rejected"}
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed"}
+	p.accounts[2].rateLimit = RateLimit{Status: "rejected"}
+
+	if p.AllRejected() {
+		t.Error("AllRejected should be false when some accounts are not rejected")
+	}
+}
+
 func TestSelectBestCautionFallback(t *testing.T) {
 	// All accounts over threshold (caution) but none rejected — Priority 3.
 	// Should switch to the account with the lowest 5h utilization.
