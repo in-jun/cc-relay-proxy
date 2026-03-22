@@ -379,6 +379,35 @@ func TestSetRefreshCallback(t *testing.T) {
 	_ = called
 }
 
+func TestParseRateLimitHeadersMissingStatus(t *testing.T) {
+	// No status header → should return false
+	h := http.Header{}
+	h.Set("anthropic-ratelimit-unified-5h-utilization", "0.50")
+	_, ok := ParseRateLimitHeaders(h)
+	if ok {
+		t.Error("ParseRateLimitHeaders should return false when status header is absent")
+	}
+}
+
+func TestParseRateLimitHeadersPartial(t *testing.T) {
+	// Only status header — other fields default to zero
+	h := http.Header{}
+	h.Set("anthropic-ratelimit-unified-status", "allowed")
+	rl, ok := ParseRateLimitHeaders(h)
+	if !ok {
+		t.Fatal("should parse ok with only status header")
+	}
+	if rl.Status != "allowed" {
+		t.Errorf("want allowed, got %s", rl.Status)
+	}
+	if rl.FiveHourUtil != 0.0 {
+		t.Errorf("FiveHourUtil should default to 0, got %f", rl.FiveHourUtil)
+	}
+	if !rl.FiveHourReset.IsZero() {
+		t.Error("FiveHourReset should be zero when header absent")
+	}
+}
+
 func TestDefaultParams(t *testing.T) {
 	p2 := defaultParams(2)
 	if p2.SwitchThreshold5h != 0.75 {

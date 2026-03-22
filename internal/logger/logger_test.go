@@ -30,6 +30,77 @@ func TestLogAndRead(t *testing.T) {
 	}
 }
 
+func TestLogNilData(t *testing.T) {
+	f, _ := os.CreateTemp("", "proxy-log-*.jsonl")
+	f.Close()
+	path := f.Name()
+	defer os.Remove(path)
+
+	l, _ := New(path)
+	defer l.Close()
+
+	l.Log("startup", "acct1", nil)
+
+	lines := l.ReadLines()
+	if len(lines) != 1 {
+		t.Fatalf("want 1 line, got %d", len(lines))
+	}
+	if _, hasData := lines[0]["data"]; hasData {
+		t.Error("data field should be absent when nil")
+	}
+}
+
+func TestLogEmptyAccount(t *testing.T) {
+	f, _ := os.CreateTemp("", "proxy-log-*.jsonl")
+	f.Close()
+	path := f.Name()
+	defer os.Remove(path)
+
+	l, _ := New(path)
+	defer l.Close()
+
+	l.Log("startup", "", map[string]any{"key": "val"})
+
+	lines := l.ReadLines()
+	if len(lines) != 1 {
+		t.Fatalf("want 1 line, got %d", len(lines))
+	}
+	if _, hasAcct := lines[0]["account"]; hasAcct {
+		t.Error("account field should be absent for empty account string")
+	}
+}
+
+func TestReadLinesFromRotatedFile(t *testing.T) {
+	f, _ := os.CreateTemp("", "proxy-log-*.jsonl")
+	f.Close()
+	path := f.Name()
+	defer os.Remove(path)
+	defer os.Remove(path + ".1")
+
+	// Write to first logger, then close and rename to simulate rotation
+	l, _ := New(path)
+	l.Log("event1", "acct1", nil)
+	l.Close()
+	os.Rename(path, path+".1")
+
+	// Open fresh logger (creates new .log file)
+	l2, _ := New(path)
+	defer l2.Close()
+	l2.Log("event2", "acct2", nil)
+
+	// ReadLines should include both .1 and .log
+	lines := l2.ReadLines()
+	if len(lines) != 2 {
+		t.Fatalf("want 2 lines (from .1 and .log), got %d", len(lines))
+	}
+	if lines[0]["event"] != "event1" {
+		t.Errorf("first line should be from rotated file, got %v", lines[0]["event"])
+	}
+	if lines[1]["event"] != "event2" {
+		t.Errorf("second line should be from current file, got %v", lines[1]["event"])
+	}
+}
+
 func TestRotation(t *testing.T) {
 	f, _ := os.CreateTemp("", "proxy-log-*.jsonl")
 	f.Close()
