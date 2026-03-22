@@ -405,12 +405,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type paramsStatus struct {
-		SwitchThreshold5h float64 `json:"switchThreshold5h"`
-		HardBlock7d       float64 `json:"hardBlock7d"`
-		Weight5h          float64 `json:"weight5h"`
-		Weight7d          float64 `json:"weight7d"`
-		TuneInterval      string  `json:"tuneInterval"`
-		LastTuned         string  `json:"lastTuned"`
+		SwitchThreshold5h   float64 `json:"switchThreshold5h"`
+		HardBlock7d         float64 `json:"hardBlock7d"`
+		Weight5h            float64 `json:"weight5h"`
+		Weight7d            float64 `json:"weight7d"`
+		ProactiveHysteresis float64 `json:"proactiveHysteresis"`
+		TuneInterval        string  `json:"tuneInterval"`
+		LastTuned           string  `json:"lastTuned"`
 	}
 
 	ti := s.pinger.TuneInterval()
@@ -426,12 +427,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"totalSwitches": s.stats.TotalSwitches.Load(),
 		"total429":      s.stats.Total429.Load(),
 		"params": paramsStatus{
-			SwitchThreshold5h: params.SwitchThreshold5h,
-			HardBlock7d:       params.HardBlock7d,
-			Weight5h:          params.Weight5h,
-			Weight7d:          params.Weight7d,
-			TuneInterval:      tuneIntervalStr,
-			LastTuned:         s.pinger.LastTuned(),
+			SwitchThreshold5h:   params.SwitchThreshold5h,
+			HardBlock7d:         params.HardBlock7d,
+			Weight5h:            params.Weight5h,
+			Weight7d:            params.Weight7d,
+			ProactiveHysteresis: params.ProactiveHysteresis,
+			TuneInterval:        tuneIntervalStr,
+			LastTuned:           s.pinger.LastTuned(),
 		},
 		"accounts":    accts,
 		"tuneHistory": s.pinger.TuneHistory(),

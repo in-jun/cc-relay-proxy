@@ -44,10 +44,11 @@ type Account struct {
 
 // Params holds tunable algorithm parameters.
 type Params struct {
-	SwitchThreshold5h float64
-	HardBlock7d       float64
-	Weight5h          float64
-	Weight7d          float64
+	SwitchThreshold5h   float64
+	HardBlock7d         float64
+	Weight5h            float64 // retained for logging/tuning history; not used in selection
+	Weight7d            float64 // retained for logging/tuning history; not used in selection
+	ProactiveHysteresis float64 // fraction improvement required to switch proactively (0=disabled)
 }
 
 // Pool manages a set of Anthropic accounts and implements the selection algorithm.
@@ -156,11 +157,14 @@ func ParseAccounts(data string) ([]*Account, error) {
 func defaultParams(n int) Params {
 	switch {
 	case n <= 2:
-		return Params{SwitchThreshold5h: 0.75, HardBlock7d: 0.90, Weight5h: 0.80, Weight7d: 0.20}
+		// 2 accounts: disable proactive switching to avoid flip-flopping.
+		return Params{SwitchThreshold5h: 0.75, HardBlock7d: 0.90, Weight5h: 0.80, Weight7d: 0.20, ProactiveHysteresis: 0.0}
 	case n <= 4:
-		return Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90, Weight5h: 0.70, Weight7d: 0.30}
+		// 3-4 accounts: switch proactively when best alternative is ≥20% better.
+		return Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90, Weight5h: 0.70, Weight7d: 0.30, ProactiveHysteresis: 0.20}
 	default:
-		return Params{SwitchThreshold5h: 0.85, HardBlock7d: 0.90, Weight5h: 0.50, Weight7d: 0.50}
+		// 5+ accounts: finer-grained routing, switch at 15% improvement.
+		return Params{SwitchThreshold5h: 0.85, HardBlock7d: 0.90, Weight5h: 0.50, Weight7d: 0.50, ProactiveHysteresis: 0.15}
 	}
 }
 
@@ -288,9 +292,16 @@ func (p *Pool) RateLimitFor(name string) RateLimit {
 	return RateLimit{}
 }
 
-// score computes the weighted utilization score for an account (lower = preferred).
-func score(rl RateLimit, params Params) float64 {
-	return params.Weight5h*rl.FiveHourUtil + params.Weight7d*rl.SevenDayUtil
+// waterScore computes the water-filling score for an account (lower = preferred).
+// Uses max(5h_util/threshold, 7d_util/hardBlock) so routing naturally equalizes
+// utilization across both dimensions simultaneously.
+func waterScore(rl RateLimit, params Params) float64 {
+	s5h := rl.FiveHourUtil / params.SwitchThreshold5h
+	s7d := rl.SevenDayUtil / params.HardBlock7d
+	if s5h > s7d {
+		return s5h
+	}
+	return s7d
 }
 
 func isBlocked(rl RateLimit, params Params) bool {
@@ -299,10 +310,21 @@ func isBlocked(rl RateLimit, params Params) bool {
 		rl.SevenDayUtil >= params.HardBlock7d
 }
 
-// SelectBest chooses the best account and returns the previous account name,
+// SelectBest chooses the best account using a water-filling algorithm with
+// proactive switching and hysteresis. Returns the previous account name,
 // whether a switch occurred, and the switch reason. Both name and prevName
 // are captured atomically under the write lock, eliminating the TOCTOU that
 // would arise from a separate ActiveName() call before SelectBest().
+//
+// Selection priority:
+//  1. If current is blocked (rejected / over threshold) → reactive switch to
+//     the non-blocked account with the lowest water-fill score.
+//  2. If ProactiveHysteresis > 0 and a non-blocked alternative has a water
+//     score at least ProactiveHysteresis fraction lower than current → proactive
+//     switch to equalize utilization before hitting the threshold.
+//  3. Keep current.
+//  4. Fallback (all blocked, none rejected) → caution: pick lowest 5h.
+//  5. All rejected → stay, caller forwards 429.
 func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -313,14 +335,12 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 	curRL := cur.rateLimit
 	cur.mu.RUnlock()
 
-	// Priority 1: keep current if it's fine
-	if !isBlocked(curRL, params) {
-		return cur.Name, cur.Name, false, ""
-	}
+	curBlocked := isBlocked(curRL, params)
+	curWater := waterScore(curRL, params)
 
-	// Priority 2: switch to best non-blocked account
+	// Find best non-blocked alternative by water-fill score.
 	bestIdx := -1
-	bestScore := math.MaxFloat64
+	bestWater := math.MaxFloat64
 	for i, a := range p.accounts {
 		if i == p.active {
 			continue
@@ -329,40 +349,63 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 		rl := a.rateLimit
 		a.mu.RUnlock()
 		if !isBlocked(rl, params) {
-			s := score(rl, params)
-			if s < bestScore {
-				bestScore = s
+			ws := waterScore(rl, params)
+			if ws < bestWater {
+				bestWater = ws
 				bestIdx = i
 			}
 		}
 	}
-	if bestIdx >= 0 {
-		from := p.accounts[p.active].Name
-		p.active = bestIdx
-		to := p.accounts[p.active].Name
-		return to, from, true, fmt.Sprintf("threshold: %s exhausted, switching to %s", from, to)
+
+	// Priority 1: reactive switch — current is blocked.
+	if curBlocked {
+		if bestIdx >= 0 {
+			from := p.accounts[p.active].Name
+			p.active = bestIdx
+			to := p.accounts[p.active].Name
+			return to, from, true, fmt.Sprintf("threshold: %s exhausted, switching to %s", from, to)
+		}
+
+		// Priority 4: all alternatives are also blocked — caution fallback.
+		// Pick lowest 5h among non-rejected accounts.
+		cautionIdx := -1
+		bestUtil := math.MaxFloat64
+		for i, a := range p.accounts {
+			a.mu.RLock()
+			rl := a.rateLimit
+			a.mu.RUnlock()
+			if rl.Status != "rejected" && rl.FiveHourUtil < bestUtil {
+				bestUtil = rl.FiveHourUtil
+				cautionIdx = i
+			}
+		}
+		if cautionIdx >= 0 && cautionIdx != p.active {
+			from := p.accounts[p.active].Name
+			p.active = cautionIdx
+			to := p.accounts[p.active].Name
+			return to, from, true, fmt.Sprintf("caution-fallback: all near-threshold, %s has lowest 5h", to)
+		}
+
+		// Priority 5: all rejected — stay, caller forwards 429.
+		return cur.Name, cur.Name, false, ""
 	}
 
-	// Priority 3: all blocked — pick lowest 5h among non-rejected
-	bestIdx = -1
-	bestUtil := math.MaxFloat64
-	for i, a := range p.accounts {
-		a.mu.RLock()
-		rl := a.rateLimit
-		a.mu.RUnlock()
-		if rl.Status != "rejected" && rl.FiveHourUtil < bestUtil {
-			bestUtil = rl.FiveHourUtil
-			bestIdx = i
+	// Priority 2: proactive switch — current is fine but a significantly
+	// less-loaded account is available.
+	if params.ProactiveHysteresis > 0 && bestIdx >= 0 {
+		threshold := curWater * (1 - params.ProactiveHysteresis)
+		if bestWater < threshold {
+			from := p.accounts[p.active].Name
+			p.active = bestIdx
+			to := p.accounts[p.active].Name
+			return to, from, true, fmt.Sprintf(
+				"proactive: %s water=%.3f → %s water=%.3f (hysteresis=%.0f%%)",
+				from, curWater, to, bestWater, params.ProactiveHysteresis*100,
+			)
 		}
 	}
-	if bestIdx >= 0 && bestIdx != p.active {
-		from := p.accounts[p.active].Name
-		p.active = bestIdx
-		to := p.accounts[p.active].Name
-		return to, from, true, fmt.Sprintf("caution-fallback: all near-threshold, %s has lowest 5h", to)
-	}
 
-	// Priority 4: all rejected — stay on current (caller will forward 429)
+	// Priority 3: keep current.
 	return cur.Name, cur.Name, false, ""
 }
 

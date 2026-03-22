@@ -483,6 +483,81 @@ func TestRunTickerFires(t *testing.T) {
 	tu.Run(ctx) // blocks until ctx expires; ticker fires multiple times
 }
 
+func TestAnalyzeProactiveHysteresisRises(t *testing.T) {
+	// Rule 5a: >5 proactive switches/hr with low 429 rate → increase hysteresis.
+	pool := makeTestPool()
+	l, cleanup := makeTestLogger(t)
+	defer cleanup()
+
+	// Set a non-zero initial hysteresis so it can change.
+	pool.SetParams(accounts.Params{
+		SwitchThreshold5h:   0.75,
+		HardBlock7d:         0.90,
+		Weight5h:            0.80,
+		Weight7d:            0.20,
+		ProactiveHysteresis: 0.10,
+	})
+	oldParams := pool.Params()
+
+	// 100 padding request events
+	for i := 0; i < 100; i++ {
+		l.Log("request", "a1", map[string]any{"method": "POST"})
+	}
+	// 130 proactive switches (>5/hour over 24h window = >120 total)
+	for i := 0; i < 130; i++ {
+		l.Log("account_switched", "a2", map[string]any{
+			"from":            "a1",
+			"to":              "a2",
+			"reason":          "proactive: a1 water=0.70 → a2 water=0.40 (hysteresis=10%)",
+			"fiveHour_before": 0.56,
+		})
+	}
+	// 0 429s → rate429 < 0.1
+
+	tu := New(pool, l, time.Hour)
+	tu.analyze()
+
+	newParams := pool.Params()
+	if newParams.ProactiveHysteresis <= oldParams.ProactiveHysteresis {
+		t.Errorf("high proactive rate should increase hysteresis: old=%f, new=%f",
+			oldParams.ProactiveHysteresis, newParams.ProactiveHysteresis)
+	}
+}
+
+func TestAnalyzeProactiveHysteresisDropsOn429(t *testing.T) {
+	// Rule 5b: elevated 429 rate with positive hysteresis → decrease hysteresis.
+	pool := makeTestPool()
+	l, cleanup := makeTestLogger(t)
+	defer cleanup()
+
+	pool.SetParams(accounts.Params{
+		SwitchThreshold5h:   0.75,
+		HardBlock7d:         0.90,
+		Weight5h:            0.80,
+		Weight7d:            0.20,
+		ProactiveHysteresis: 0.20,
+	})
+	oldParams := pool.Params()
+
+	// 100 padding events
+	for i := 0; i < 100; i++ {
+		l.Log("request", "a1", map[string]any{"method": "POST"})
+	}
+	// 15 429s → rate = 15/24h = 0.625 > 0.5
+	for i := 0; i < 15; i++ {
+		l.Log("429_received", "a1", map[string]any{"action": "switch", "fiveHour": 0.9})
+	}
+
+	tu := New(pool, l, time.Hour)
+	tu.analyze()
+
+	newParams := pool.Params()
+	if newParams.ProactiveHysteresis >= oldParams.ProactiveHysteresis {
+		t.Errorf("elevated 429 rate should decrease hysteresis: old=%f, new=%f",
+			oldParams.ProactiveHysteresis, newParams.ProactiveHysteresis)
+	}
+}
+
 func TestClamp(t *testing.T) {
 	if clamp(1.5, 0, 1) != 1 {
 		t.Error("clamp max failed")
