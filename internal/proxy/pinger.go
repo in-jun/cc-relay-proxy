@@ -60,17 +60,49 @@ func (p *Pinger) StartupPing(ctx context.Context) {
 	}
 }
 
-// Run starts the periodic ping loop.
+// Run starts the periodic ping loop and the reset-watcher.
 func (p *Pinger) Run(ctx context.Context) {
 	ticker := time.NewTicker(pingInterval)
+	resetTicker := time.NewTicker(30 * time.Second) // check reset times frequently
 	defer ticker.Stop()
+	defer resetTicker.Stop()
+
+	// Track which accounts we've already scheduled a reset-ping for
+	scheduledReset := map[string]time.Time{}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			p.pingAccount(ctx, p.pool.ActiveName())
+		case <-resetTicker.C:
+			// Ping accounts whose 5h reset window has arrived
+			p.checkAndPingResets(ctx, scheduledReset)
 		}
+	}
+}
+
+// checkAndPingResets pings blocked accounts whose reset time has passed.
+func (p *Pinger) checkAndPingResets(ctx context.Context, scheduled map[string]time.Time) {
+	now := time.Now()
+	for _, snap := range p.pool.Accounts() {
+		rl := snap.RateLimit
+		// Only ping if account was blocked (status rejected or high util) and reset has passed
+		if rl.Status != "rejected" {
+			continue
+		}
+		reset := rl.FiveHourReset
+		if reset.IsZero() || reset.After(now) {
+			continue
+		}
+		// Avoid pinging more than once per reset cycle
+		if last, ok := scheduled[snap.Name]; ok && last.Equal(reset) {
+			continue
+		}
+		scheduled[snap.Name] = reset
+		log.Printf("[pinger] reset arrived for %s, pinging to confirm availability", snap.Name)
+		go p.pingAccount(ctx, snap.Name)
 	}
 }
 
