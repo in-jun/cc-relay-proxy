@@ -2,9 +2,9 @@
 package logger
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -106,7 +106,7 @@ func (l *Logger) ReadLines() []map[string]any {
 
 	var result []map[string]any
 	for _, data := range snapshots {
-		dec := json.NewDecoder(newByteReader(data))
+		dec := json.NewDecoder(bytes.NewReader(data))
 		for dec.More() {
 			var obj map[string]any
 			if err := dec.Decode(&obj); err != nil {
@@ -118,18 +118,3 @@ func (l *Logger) ReadLines() []map[string]any {
 	return result
 }
 
-// byteReader wraps a byte slice as an io.Reader.
-type byteReader struct {
-	b []byte
-	i int
-}
-
-func newByteReader(b []byte) *byteReader { return &byteReader{b: b} }
-func (r *byteReader) Read(p []byte) (int, error) {
-	if r.i >= len(r.b) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.b[r.i:])
-	r.i += n
-	return n, nil
-}
