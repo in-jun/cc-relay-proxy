@@ -18,6 +18,7 @@ const (
 	Scopes             = "user:inference user:profile user:sessions:claude_code user:mcp_servers user:file_upload"
 	TokenRefreshMargin = 5 * time.Minute
 	refreshTimeout     = 15 * time.Second
+	refreshMaxRetries  = 3
 )
 
 // Token holds an account's current OAuth credentials.
@@ -57,14 +58,35 @@ func (t *Token) Ensure(ctx context.Context) (string, error) {
 	}
 	t.mu.RUnlock()
 
-	// Slow path: refresh
+	// Slow path: refresh with exponential backoff
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// Double-check after acquiring write lock
 	if t.accessToken != "" && time.Now().Add(TokenRefreshMargin).Before(t.expiresAt) {
 		return t.accessToken, nil
 	}
-	return t.refresh(ctx)
+
+	var lastErr error
+	for attempt := 0; attempt < refreshMaxRetries; attempt++ {
+		if attempt > 0 {
+			wait := time.Duration(1<<uint(attempt-1)) * time.Second // 1s, 2s
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		tok, err := t.refresh(ctx)
+		if err == nil {
+			return tok, nil
+		}
+		lastErr = err
+		// Don't retry on permanent errors (invalid_grant etc.)
+		if isPermError(err) {
+			break
+		}
+	}
+	return "", lastErr
 }
 
 // refresh performs the OAuth token exchange. Must be called with write lock held.
@@ -118,6 +140,26 @@ func (t *Token) refresh(ctx context.Context) (string, error) {
 	}
 	t.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
 	return t.accessToken, nil
+}
+
+// isPermError reports whether an error from the token endpoint should not be retried.
+func isPermError(err error) bool {
+	s := err.Error()
+	// invalid_grant = refresh token invalid/consumed; don't hammer the endpoint
+	return contains(s, "invalid_grant") || contains(s, "invalid_client") || contains(s, "401")
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr(s, sub))
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 // ExpiresAt returns when the current access token expires (zero if none).

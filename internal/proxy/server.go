@@ -96,12 +96,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	accountName, switched, switchReason := s.pool.SelectBest()
 	if switched {
 		s.stats.TotalSwitches.Add(1)
-		rl := s.pool.RateLimitFor(accountName)
+		prevRL := s.pool.RateLimitFor(prevAccount) // rate limit of old account (reason for switch)
 		s.log.Log("account_switched", accountName, map[string]any{
 			"from":            prevAccount,
 			"to":              accountName,
 			"reason":          switchReason,
-			"fiveHour_before": rl.FiveHourUtil,
+			"fiveHour_before": prevRL.FiveHourUtil,
 		})
 		// Ping the previous account in background to measure its recovery speed
 		go s.pinger.PingAfterSwitch(r.Context(), prevAccount)
