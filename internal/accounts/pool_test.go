@@ -94,6 +94,19 @@ func TestParseRateLimitHeaders(t *testing.T) {
 	}
 }
 
+func TestSoonestResetSkipsZeroTimes(t *testing.T) {
+	p := makePool(2)
+	// a1 has no reset time (zero), a2 has a real reset time
+	reset := time.Now().Add(5 * time.Minute)
+	p.accounts[0].rateLimit = RateLimit{Status: "rejected", FiveHourReset: time.Time{}} // zero
+	p.accounts[1].rateLimit = RateLimit{Status: "rejected", FiveHourReset: reset}
+
+	soonest := p.SoonestReset()
+	if soonest != reset {
+		t.Errorf("SoonestReset should skip zero times and return a2's reset; got %v, want %v", soonest, reset)
+	}
+}
+
 func TestDefaultParams(t *testing.T) {
 	p2 := defaultParams(2)
 	if p2.SwitchThreshold5h != 0.75 {
