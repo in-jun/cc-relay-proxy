@@ -7,14 +7,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/in-jun/cc-relay-proxy/internal/accounts"
 	"github.com/in-jun/cc-relay-proxy/internal/logger"
 	"github.com/in-jun/cc-relay-proxy/internal/proxy"
-	"github.com/in-jun/cc-relay-proxy/internal/tuner"
 )
 
 func main() {
@@ -30,15 +28,6 @@ func run() error {
 	bindAddr := envOrDefault("CC_PROXY_BIND", "127.0.0.1")
 	logPath := envOrDefault("CC_LOG_PATH", "logs/proxy.log")
 
-	tuneIntervalSec := 3600
-	if v := os.Getenv("CC_TUNE_INTERVAL"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("CC_TUNE_INTERVAL: must be a positive integer, got %q", v)
-		}
-		tuneIntervalSec = n
-	}
-
 	// Parse accounts from file first — fail fast before touching the log file
 	accts, err := accounts.ParseAccountsFile(accountsFile)
 	if err != nil {
@@ -53,17 +42,11 @@ func run() error {
 	defer l.Close()
 
 	pool := accounts.NewPool(accts)
-	params := pool.Params()
 
 	l.Log("startup", "", map[string]any{
-		"numAccounts": len(accts),
-		"listenAddr":  bindAddr + ":" + port,
-		"params": map[string]any{
-			"switchThreshold5h": params.SwitchThreshold5h,
-			"hardBlock7d":       params.HardBlock7d,
-			"weight5h":          params.Weight5h,
-			"weight7d":          params.Weight7d,
-		},
+		"numAccounts":         len(accts),
+		"listenAddr":          bindAddr + ":" + port,
+		"proactiveHysteresis": accounts.ProactiveHysteresis,
 	})
 
 	// Wire refresh callbacks so token refreshes appear in the log
@@ -77,18 +60,13 @@ func run() error {
 	listenAddr := bindAddr + ":" + port
 	log.Printf("[cc-relay-proxy] starting on %s with %d account(s)", listenAddr, len(accts))
 
-	// Build components
 	srv := proxy.New(pool, l)
-	tuneInterval := time.Duration(tuneIntervalSec) * time.Second
-	t := tuner.New(pool, l, tuneInterval)
-	srv.Pinger().SetTuner(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go srv.Pinger().StartupPing(ctx)
 	go srv.Pinger().Run(ctx)
-	go t.Run(ctx)
 
 	httpSrv := &http.Server{
 		Addr:         listenAddr,

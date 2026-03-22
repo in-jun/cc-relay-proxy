@@ -13,7 +13,6 @@ import (
 
 	"github.com/in-jun/cc-relay-proxy/internal/accounts"
 	"github.com/in-jun/cc-relay-proxy/internal/logger"
-	"github.com/in-jun/cc-relay-proxy/internal/tuner"
 )
 
 func newTestPool() *accounts.Pool {
@@ -175,29 +174,6 @@ func TestProxySwitchesOn429(t *testing.T) {
 	}
 }
 
-func TestPingerSetTunerAndAccessors(t *testing.T) {
-	pool := newTestPool()
-	l := newTestLogger(t)
-	srv := New(pool, l)
-	p := srv.Pinger()
-
-	tu := tuner.New(pool, l, time.Hour)
-	p.SetTuner(tu)
-
-	if p.TuneInterval() != time.Hour {
-		t.Errorf("TuneInterval: want 1h, got %v", p.TuneInterval())
-	}
-	// Before any tune, LastTuned should say "never"
-	if p.LastTuned() != "never" {
-		t.Errorf("LastTuned before any tune: want 'never', got %s", p.LastTuned())
-	}
-	// TuneHistory should be empty initially
-	hist := p.TuneHistory()
-	if hist == nil {
-		t.Error("TuneHistory should be non-nil")
-	}
-}
-
 func TestProxyStreamsSSEResponse(t *testing.T) {
 	// Upstream that sends a text/event-stream response
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -271,42 +247,6 @@ func TestServerHandlerAndPinger(t *testing.T) {
 	p := srv.Pinger()
 	if p == nil {
 		t.Error("Pinger() should return non-nil")
-	}
-}
-
-func TestPingerAccessorsNoTuner(t *testing.T) {
-	pool := newTestPool()
-	l := newTestLogger(t)
-	srv := New(pool, l)
-	p := srv.Pinger()
-
-	// No tuner attached — test nil-tuner paths
-	hist := p.TuneHistory()
-	if hist == nil {
-		t.Error("TuneHistory with no tuner should return non-nil (empty slice)")
-	}
-	if p.TuneInterval() != 0 {
-		t.Errorf("TuneInterval with no tuner should be 0, got %v", p.TuneInterval())
-	}
-	if p.LastTuned() != "never" {
-		t.Errorf("LastTuned with no tuner should be 'never', got %s", p.LastTuned())
-	}
-}
-
-func TestFormatAgoSimple(t *testing.T) {
-	tests := []struct {
-		d    time.Duration
-		want string
-	}{
-		{10 * time.Second, "just now"},
-		{3 * time.Minute, "3m ago"},
-		{2*time.Hour + 15*time.Minute, "2h ago"},
-	}
-	for _, tt := range tests {
-		got := formatAgoSimple(tt.d)
-		if got != tt.want {
-			t.Errorf("formatAgoSimple(%v) = %q, want %q", tt.d, got, tt.want)
-		}
 	}
 }
 
@@ -607,18 +547,14 @@ func TestSendRequestDebugMode(t *testing.T) {
 	}
 }
 
-func TestStatusEndpointWithLastSeenAndTuner(t *testing.T) {
-	// Covers:
-	//   - lastSeenStr = formatAgo(...)  (LastSeen is non-zero after UpdateRateLimit)
-	//   - tuneIntervalStr = ti.String() (pinger has a tuner with interval > 0)
+func TestStatusEndpointWithLastSeen(t *testing.T) {
+	// Covers lastSeenStr = formatAgo(...) when LastSeen is non-zero after UpdateRateLimit.
 	pool := newTestPool()
 	pool.UpdateRateLimit("a1", accounts.RateLimit{
 		Status: "allowed", FiveHourUtil: 0.5,
 	})
 	l := newTestLogger(t)
 	srv := New(pool, l)
-	tu := tuner.New(pool, l, 5*time.Minute)
-	srv.pinger.SetTuner(tu)
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	w := httptest.NewRecorder()
@@ -628,36 +564,11 @@ func TestStatusEndpointWithLastSeenAndTuner(t *testing.T) {
 		t.Errorf("want 200, got %d", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "5m0s") {
-		t.Errorf("expected tuneInterval=5m0s in response body, got: %s", body)
-	}
 	if !strings.Contains(body, "ago") && !strings.Contains(body, "just now") {
 		t.Errorf("expected lastSeen to contain ago/just now, got: %s", body)
 	}
-}
-
-func TestPingerLastTunedAfterTune(t *testing.T) {
-	// Covers the formatAgoSimple branch in pinger.LastTuned() when LastTuned is non-zero.
-	pool := newTestPool()
-	l := newTestLogger(t)
-
-	// Inject enough events to trigger a parameter change (high 429 rate)
-	for i := 0; i < 30; i++ {
-		l.Log("429_received", "a1", map[string]any{"action": "switch", "fiveHour": 0.9})
-	}
-	for i := 0; i < 80; i++ {
-		l.Log("request", "a1", map[string]any{"method": "POST"})
-	}
-
-	tu := tuner.New(pool, l, time.Hour)
-	tu.Analyze() // triggers param change (high 429 rate), sets LastTuned to now
-	srv := New(pool, l)
-	srv.pinger.SetTuner(tu)
-
-	// LastTuned should now return something like "just now" or "Xm ago"
-	result := srv.pinger.LastTuned()
-	if result == "never" {
-		t.Errorf("LastTuned should not be 'never' after tuner ran, got %q", result)
+	if !strings.Contains(body, "proactiveHysteresis") {
+		t.Errorf("expected proactiveHysteresis in status body, got: %s", body)
 	}
 }
 
