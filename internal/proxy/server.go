@@ -139,6 +139,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
+			// If 429 but no rate limit headers, force status to "rejected" so SelectBest switches
+			if !hasRL {
+				existing := s.pool.RateLimitFor(accountName)
+				existing.Status = "rejected"
+				s.pool.UpdateRateLimit(accountName, existing)
+			}
 			resp.Body.Close()
 			s.stats.Total429.Add(1)
 
