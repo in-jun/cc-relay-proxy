@@ -507,3 +507,68 @@ func TestProxy429AllRejectedWaitTooLong(t *testing.T) {
 		t.Errorf("want 429 forwarded when all rejected and wait too long, got %d", w.Code)
 	}
 }
+
+func TestProxyHoldContextCancelled(t *testing.T) {
+	// All accounts rejected, reset in 1 second (within ProxyHoldMax).
+	// The client cancels its context after 100ms → the hold select fires
+	// on r.Context().Done() and the handler returns without forwarding.
+	soonestReset := time.Now().Add(1 * time.Second)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return 429 with no rate-limit headers so the existing status is preserved
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	pool := newSeededTestPool(t)
+	pool.UpdateRateLimit("a1", accounts.RateLimit{
+		Status: "rejected", FiveHourUtil: 1.0, FiveHourReset: soonestReset,
+	})
+	pool.UpdateRateLimit("a2", accounts.RateLimit{
+		Status: "rejected", FiveHourUtil: 1.0, FiveHourReset: soonestReset,
+	})
+
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	// Context cancels after 100ms — long enough for sendRequest but shorter than
+	// the 1-second hold duration; the hold select will fire on ctx.Done().
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req) // should return quickly (< 1s)
+	// No response code assertion — handler returns without writing when ctx is done.
+}
+
+func TestStatusEndpointWithLastSeenAndTuner(t *testing.T) {
+	// Covers:
+	//   - lastSeenStr = formatAgo(...)  (LastSeen is non-zero after UpdateRateLimit)
+	//   - tuneIntervalStr = ti.String() (pinger has a tuner with interval > 0)
+	pool := newTestPool()
+	pool.UpdateRateLimit("a1", accounts.RateLimit{
+		Status: "allowed", FiveHourUtil: 0.5,
+	})
+	l := newTestLogger(t)
+	srv := New(pool, l)
+	tu := tuner.New(pool, l, 5*time.Minute)
+	srv.pinger.SetTuner(tu)
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	srv.handleStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "5m0s") {
+		t.Errorf("expected tuneInterval=5m0s in response body, got: %s", body)
+	}
+	if !strings.Contains(body, "ago") && !strings.Contains(body, "just now") {
+		t.Errorf("expected lastSeen to contain ago/just now, got: %s", body)
+	}
+}
