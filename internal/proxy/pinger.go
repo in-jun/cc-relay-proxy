@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/in-jun/cc-relay-proxy/internal/accounts"
@@ -89,10 +90,20 @@ func formatAgoSimple(d time.Duration) string {
 }
 
 // StartupPing pings all accounts once to establish baseline rate limit state.
+// It waits for all pings to complete, then emits a pool_snapshot event so the
+// tuner and log analysis tools have an accurate starting point.
 func (p *Pinger) StartupPing(ctx context.Context) {
-	for _, snap := range p.pool.Accounts() {
-		go p.pingAccount(ctx, snap.Name)
+	snaps := p.pool.Accounts()
+	var wg sync.WaitGroup
+	for _, snap := range snaps {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			p.pingAccount(ctx, name)
+		}(snap.Name)
 	}
+	wg.Wait()
+	p.emitPoolSnapshot("startup")
 }
 
 // Run starts the periodic ping loop and the reset-watcher.
@@ -111,6 +122,7 @@ func (p *Pinger) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			p.pingAccount(ctx, p.pool.ActiveName())
+			p.emitPoolSnapshot("periodic")
 		case <-resetTicker.C:
 			// Ping accounts whose 5h reset window has arrived
 			p.checkAndPingResets(ctx, scheduledReset)
@@ -172,10 +184,36 @@ func (p *Pinger) pingAccount(ctx context.Context, name string) {
 	rl, hasRL := accounts.ParseRateLimitHeaders(resp.Header)
 	if hasRL {
 		p.pool.UpdateRateLimit(name, rl)
+		params := p.pool.Params()
 		p.log.Log("ping", name, map[string]any{
 			"fiveHour":  rl.FiveHourUtil,
 			"sevenDay":  rl.SevenDayUtil,
+			"water":     accounts.WaterScore(rl, params),
+			"status":    rl.Status,
 			"latencyMs": time.Since(start).Milliseconds(),
 		})
 	}
+}
+
+// emitPoolSnapshot logs a point-in-time view of all accounts' utilization and
+// water scores. Used by the tuner's log analysis to understand pool state over time.
+func (p *Pinger) emitPoolSnapshot(trigger string) {
+	params := p.pool.Params()
+	snaps := p.pool.Accounts()
+	accts := make([]map[string]any, len(snaps))
+	for i, snap := range snaps {
+		rl := snap.RateLimit
+		accts[i] = map[string]any{
+			"name":     snap.Name,
+			"isActive": snap.IsActive,
+			"fiveHour": rl.FiveHourUtil,
+			"sevenDay": rl.SevenDayUtil,
+			"water":    accounts.WaterScore(rl, params),
+			"status":   rl.Status,
+		}
+	}
+	p.log.Log("pool_snapshot", "", map[string]any{
+		"trigger":  trigger,
+		"accounts": accts,
+	})
 }

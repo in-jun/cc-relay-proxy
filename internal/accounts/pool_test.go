@@ -311,14 +311,14 @@ func TestWaterScore(t *testing.T) {
 	params := Params{SwitchThreshold5h: 0.80, HardBlock7d: 0.90}
 	// 5h dominates: max(0.64/0.80, 0.27/0.90) = max(0.80, 0.30) = 0.80
 	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27}
-	ws := waterScore(rl, params)
+	ws := WaterScore(rl, params)
 	want5h := 0.64 / 0.80
 	if ws < want5h-eps || ws > want5h+eps {
 		t.Errorf("5h-dominant: want %.6f, got %.6f", want5h, ws)
 	}
 	// 7d dominates: max(0.10/0.80, 0.81/0.90) = max(0.125, 0.90) = 0.90
 	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81}
-	ws2 := waterScore(rl2, params)
+	ws2 := WaterScore(rl2, params)
 	want7d := 0.81 / 0.90
 	if ws2 < want7d-eps || ws2 > want7d+eps {
 		t.Errorf("7d-dominant: want %.6f, got %.6f", want7d, ws2)

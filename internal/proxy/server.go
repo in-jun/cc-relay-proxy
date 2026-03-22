@@ -242,6 +242,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				"path":      r.URL.Path,
 				"status":    resp.StatusCode,
 				"latencyMs": time.Since(start).Milliseconds(),
+				"fiveHour":  fwdRL.FiveHourUtil,
+				"sevenDay":  fwdRL.SevenDayUtil,
+				"water":     accounts.WaterScore(fwdRL, s.pool.Params()),
 			})
 			return
 		}
@@ -286,11 +289,16 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Body.Close()
 
+		// Include current rate-limit state in every request log for tuner analysis.
+		reqRL := s.pool.RateLimitFor(accountName)
 		s.log.Log("request", accountName, map[string]any{
 			"method":    r.Method,
 			"path":      r.URL.Path,
 			"status":    resp.StatusCode,
 			"latencyMs": time.Since(start).Milliseconds(),
+			"fiveHour":  reqRL.FiveHourUtil,
+			"sevenDay":  reqRL.SevenDayUtil,
+			"water":     accounts.WaterScore(reqRL, s.pool.Params()),
 		})
 		return
 	}
@@ -315,19 +323,8 @@ func (s *Server) sendRequest(r *http.Request, bodyBuf []byte, tok string) (*http
 			outReq.Header.Add(k, v)
 		}
 	}
-	// Strip x-api-key if present (API key mode) — always use OAuth Bearer.
-	outReq.Header.Del("x-api-key")
-	outReq.Header.Set("Authorization", "Bearer "+tok)
-	// Ensure oauth-2025-04-20 beta flag is present so the API accepts OAuth tokens
-	// even when the client sent an API key (which omits the beta header).
-	existing := outReq.Header.Get("anthropic-beta")
-	if !strings.Contains(existing, "oauth-2025-04-20") {
-		if existing == "" {
-			outReq.Header.Set("anthropic-beta", "oauth-2025-04-20")
-		} else {
-			outReq.Header.Set("anthropic-beta", existing+",oauth-2025-04-20")
-		}
-	}
+	// Rewrite auth headers for OAuth — see auth_adapter.go for details.
+	adaptClientAuth(outReq, tok)
 
 	if debugMode {
 		tokPfx := tok
@@ -361,11 +358,9 @@ func (s *Server) DoUpstreamRequest(ctx context.Context, tok, path string, body [
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	// OAuth tokens require this beta header — without it the API returns 401
-	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	adaptClientAuth(req, tok)
 	return upstreamClient.Do(req)
 }
 
