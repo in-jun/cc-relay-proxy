@@ -92,39 +92,74 @@ func TestStatusEndpoint(t *testing.T) {
 }
 
 func TestProxyForwardsToUpstream(t *testing.T) {
-	// Fake upstream that returns 200
+	// Fake upstream that validates the Authorization header and returns 200
+	var receivedAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify Authorization was set
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			t.Errorf("missing Bearer token, got: %s", auth)
-		}
+		receivedAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		w.Write([]byte(`{"id":"msg_test"}`))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"msg_test","type":"message"}`))
 	}))
 	defer upstream.Close()
 
-	pool := newTestPool()
+	// Seed the account with a valid access token (far-future expiry) so no OAuth
+	// refresh is attempted — the proxy can send requests immediately.
+	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"test_bearer_token","expiresAt":9999999999999}]`)
+	pool := accounts.NewPool(accts)
 	l := newTestLogger(t)
 
-	// Inject a pre-fetched token to avoid actual OAuth
-	// We do this by testing the header-copy behavior separately
-	// (actual token refresh would require a real OAuth server)
-	_ = pool
-	_ = l
-
-	// Just verify the proxy handler routes /status correctly
-	srv := New(pool, l)
-	h := srv.Handler()
-
-	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	srv := NewWithTarget(pool, l, upstream.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","max_tokens":1}`))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Errorf("want 200, got %d", w.Code)
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200, got %d: body=%s", w.Code, w.Body.String())
 	}
-	_ = upstream
+	if !strings.HasPrefix(receivedAuth, "Bearer test_bearer_token") {
+		t.Errorf("upstream should receive proxy's access token, got: %q", receivedAuth)
+	}
+}
+
+func TestProxySwitchesOn429(t *testing.T) {
+	// First request: upstream returns 429 for acct1 token, then 200 for acct2 token
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		auth := r.Header.Get("Authorization")
+		if strings.Contains(auth, "token_a1") {
+			// acct1 gets 429
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"type":"rate_limit_error"}}`))
+		} else {
+			// acct2 gets 200
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"id":"msg_ok"}`))
+		}
+	}))
+	defer upstream.Close()
+
+	accts, _ := accounts.ParseAccounts(`[
+		{"name":"a1","refreshToken":"rt1","accessToken":"token_a1","expiresAt":9999999999999},
+		{"name":"a2","refreshToken":"rt2","accessToken":"token_a2","expiresAt":9999999999999}
+	]`)
+	pool := accounts.NewPool(accts)
+	l := newTestLogger(t)
+
+	srv := NewWithTarget(pool, l, upstream.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200 after switch, got %d", w.Code)
+	}
+	if calls < 2 {
+		t.Errorf("want at least 2 upstream calls (one 429, one success), got %d", calls)
+	}
 }
 
 func Test429WithNoRateLimitHeadersMarkesRejected(t *testing.T) {
