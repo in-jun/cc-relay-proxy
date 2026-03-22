@@ -153,12 +153,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			nextName, switched2, reason2 := s.pool.SelectBest()
 			if switched2 {
 				s.stats.TotalSwitches.Add(1)
-				s.log.Log("account_switched", nextName, map[string]any{
-					"from":   prev429Account,
-					"to":     nextName,
-					"reason": reason2,
-				})
 				actualRL := s.pool.RateLimitFor(prev429Account)
+				s.log.Log("account_switched", nextName, map[string]any{
+					"from":            prev429Account,
+					"to":              nextName,
+					"reason":          reason2,
+					"fiveHour_before": actualRL.FiveHourUtil,
+				})
 				s.log.Log("429_received", prev429Account, map[string]any{
 					"action":   "switch",
 					"fiveHour": actualRL.FiveHourUtil,
