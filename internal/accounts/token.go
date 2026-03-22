@@ -34,6 +34,17 @@ func newToken(refreshToken string) *Token {
 	return &Token{refreshToken: refreshToken}
 }
 
+// newTokenSeeded creates a Token pre-loaded with a known-valid access token.
+// The proxy will use this token until it is within TokenRefreshMargin of expiry,
+// avoiding an immediate refresh call on startup.
+func newTokenSeeded(refreshToken, accessToken string, expiresAt time.Time) *Token {
+	return &Token{
+		refreshToken: refreshToken,
+		accessToken:  accessToken,
+		expiresAt:    expiresAt,
+	}
+}
+
 // Ensure returns a valid access token, refreshing if needed.
 // It is safe to call concurrently; at most one refresh runs at a time.
 func (t *Token) Ensure(ctx context.Context) (string, error) {

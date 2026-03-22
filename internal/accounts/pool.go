@@ -12,9 +12,13 @@ import (
 )
 
 // AccountConfig is the per-account config from CC_ACCOUNTS env var.
+// accessToken and expiresAt are optional: if provided the proxy uses the
+// existing token immediately instead of forcing a refresh on first request.
 type AccountConfig struct {
 	Name         string `json:"name"`
 	RefreshToken string `json:"refreshToken"`
+	AccessToken  string `json:"accessToken,omitempty"`  // optional seed
+	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // unix ms, optional
 }
 
 // RateLimit holds the last-known rate limit state for an account.
@@ -65,12 +69,16 @@ func ParseAccounts(raw string) ([]*Account, error) {
 		if c.Name == "" {
 			c.Name = fmt.Sprintf("acct%d", i+1)
 		}
+		var tok *Token
+		if c.AccessToken != "" && c.ExpiresAt > 0 {
+			tok = newTokenSeeded(c.RefreshToken, c.AccessToken, time.UnixMilli(c.ExpiresAt))
+		} else {
+			tok = newToken(c.RefreshToken)
+		}
 		accts[i] = &Account{
-			Name:  c.Name,
-			token: newToken(c.RefreshToken),
-			rateLimit: RateLimit{
-				Status: "allowed",
-			},
+			Name:      c.Name,
+			token:     tok,
+			rateLimit: RateLimit{Status: "allowed"},
 		}
 	}
 	return accts, nil

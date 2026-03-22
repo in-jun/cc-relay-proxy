@@ -21,7 +21,7 @@ func main() {
 	// Parse configuration from environment
 	ccAccounts := os.Getenv("CC_ACCOUNTS")
 	if ccAccounts == "" {
-		log.Fatal("CC_ACCOUNTS is required (JSON array of {name, refreshToken})")
+		log.Fatal("CC_ACCOUNTS is required (JSON array of {name, refreshToken[, accessToken, expiresAt]})")
 	}
 
 	port := envOrDefault("CC_PROXY_PORT", "9999")
