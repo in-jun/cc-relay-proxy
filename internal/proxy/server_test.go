@@ -811,16 +811,41 @@ func TestPingAccountPingError(t *testing.T) {
 	p.pingAccount(ctx, "a1") // logs "[pinger] ping error …" then returns
 }
 
-func TestRunTickerAndResetCases(t *testing.T) {
-	// Run's two ticker branches:
-	//   case <-ticker.C        → pingAccount (covers line 109)
-	//   case <-resetTicker.C  → checkAndPingResets (covers line 112)
-	// We set both intervals to 1ms so tickers fire almost immediately.
-	// pingAccount uses a cancelled ctx (seeded token) → DoUpstreamRequest fails quickly.
-	// checkAndPingResets finds no rejected accounts → returns immediately.
+func TestRunPingTickerFires(t *testing.T) {
+	// case <-ticker.C → pingAccount. Set pingInterval=1ms, resetCheckInterval=10s
+	// so only the ping ticker fires within the 50ms context window.
 	origPing := pingInterval
 	origReset := resetCheckInterval
 	pingInterval = 1 * time.Millisecond
+	resetCheckInterval = 10 * time.Second // won't fire during 50ms window
+	defer func() {
+		pingInterval = origPing
+		resetCheckInterval = origReset
+	}()
+
+	pool := newSeededTestPool(t)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	p := NewPinger(pool, l, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() { p.Run(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run did not return")
+	}
+}
+
+func TestRunResetTickerFires(t *testing.T) {
+	// case <-resetTicker.C → checkAndPingResets. Set resetCheckInterval=1ms,
+	// pingInterval=10s so only the reset ticker fires within the 50ms window.
+	origPing := pingInterval
+	origReset := resetCheckInterval
+	pingInterval = 10 * time.Second    // won't fire during 50ms window
 	resetCheckInterval = 1 * time.Millisecond
 	defer func() {
 		pingInterval = origPing
@@ -832,20 +857,15 @@ func TestRunTickerAndResetCases(t *testing.T) {
 	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
 	p := NewPinger(pool, l, srv)
 
-	// Cancel after 50ms — enough for both tickers to fire at least once.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
 	done := make(chan struct{})
-	go func() {
-		p.Run(ctx)
-		close(done)
-	}()
-
+	go func() { p.Run(ctx); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Error("Run did not return after context cancellation")
+		t.Error("Run did not return")
 	}
 }
 
