@@ -93,9 +93,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		r.Body.Close()
 	}
 
-	// Select best account
-	prevAccount := s.pool.ActiveName()
-	accountName, switched, switchReason := s.pool.SelectBest()
+	// Select best account (prevAccount captured atomically inside SelectBest)
+	accountName, prevAccount, switched, switchReason := s.pool.SelectBest()
 	if switched {
 		s.stats.TotalSwitches.Add(1)
 		prevRL := s.pool.RateLimitFor(prevAccount) // rate limit of old account (reason for switch)
@@ -150,7 +149,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 			// Try another account
 			prev429Account := accountName
-			nextName, switched2, reason2 := s.pool.SelectBest()
+			nextName, _, switched2, reason2 := s.pool.SelectBest()
 			if switched2 {
 				s.stats.TotalSwitches.Add(1)
 				actualRL := s.pool.RateLimitFor(prev429Account)

@@ -197,9 +197,11 @@ func isBlocked(rl RateLimit, params Params) bool {
 		rl.SevenDayUtil >= params.HardBlock7d
 }
 
-// SelectBest chooses the best account and returns whether a switch occurred.
-// switchReason is non-empty if the active account was switched.
-func (p *Pool) SelectBest() (name string, switched bool, reason string) {
+// SelectBest chooses the best account and returns the previous account name,
+// whether a switch occurred, and the switch reason. Both name and prevName
+// are captured atomically under the write lock, eliminating the TOCTOU that
+// would arise from a separate ActiveName() call before SelectBest().
+func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -211,7 +213,7 @@ func (p *Pool) SelectBest() (name string, switched bool, reason string) {
 
 	// Priority 1: keep current if it's fine
 	if !isBlocked(curRL, params) {
-		return cur.Name, false, ""
+		return cur.Name, cur.Name, false, ""
 	}
 
 	// Priority 2: switch to best non-blocked account
@@ -236,7 +238,7 @@ func (p *Pool) SelectBest() (name string, switched bool, reason string) {
 		from := p.accounts[p.active].Name
 		p.active = bestIdx
 		to := p.accounts[p.active].Name
-		return to, true, fmt.Sprintf("threshold: %s exhausted, switching to %s", from, to)
+		return to, from, true, fmt.Sprintf("threshold: %s exhausted, switching to %s", from, to)
 	}
 
 	// Priority 3: all blocked — pick lowest 5h among non-rejected
@@ -252,13 +254,14 @@ func (p *Pool) SelectBest() (name string, switched bool, reason string) {
 		}
 	}
 	if bestIdx >= 0 && bestIdx != p.active {
+		from := p.accounts[p.active].Name
 		p.active = bestIdx
 		to := p.accounts[p.active].Name
-		return to, true, fmt.Sprintf("caution-fallback: all near-threshold, %s has lowest 5h", to)
+		return to, from, true, fmt.Sprintf("caution-fallback: all near-threshold, %s has lowest 5h", to)
 	}
 
 	// Priority 4: all rejected — stay on current (caller will forward 429)
-	return cur.Name, false, ""
+	return cur.Name, cur.Name, false, ""
 }
 
 // SoonestReset returns the soonest 5h reset time among all accounts.
