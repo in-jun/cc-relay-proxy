@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// AccountConfig is the per-account config from CC_ACCOUNTS env var.
+// AccountConfig is the per-account config read from the accounts JSON file.
 // accessToken and expiresAt are optional: if provided the proxy uses the
 // existing token immediately instead of forcing a refresh on first request.
 type AccountConfig struct {
@@ -62,7 +62,7 @@ type Pool struct {
 func ParseAccountsFile(path string) ([]*Account, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read accounts file: %w", err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	return ParseAccounts(string(data))
 }
@@ -120,14 +120,14 @@ func (p *Pool) WatchRotations(path string) {
 	}
 }
 
-// ParseAccounts parses a JSON array from CC_ACCOUNTS.
-func ParseAccounts(raw string) ([]*Account, error) {
+// ParseAccounts parses a JSON accounts array from a string.
+func ParseAccounts(data string) ([]*Account, error) {
 	var cfgs []AccountConfig
-	if err := json.Unmarshal([]byte(raw), &cfgs); err != nil {
-		return nil, fmt.Errorf("parse CC_ACCOUNTS: %w", err)
+	if err := json.Unmarshal([]byte(data), &cfgs); err != nil {
+		return nil, fmt.Errorf("parse accounts: %w", err)
 	}
 	if len(cfgs) == 0 {
-		return nil, fmt.Errorf("CC_ACCOUNTS: at least one account required")
+		return nil, fmt.Errorf("accounts: at least one account required")
 	}
 	accts := make([]*Account, len(cfgs))
 	for i, c := range cfgs {
@@ -135,7 +135,7 @@ func ParseAccounts(raw string) ([]*Account, error) {
 			c.Name = fmt.Sprintf("acct%d", i+1)
 		}
 		if c.RefreshToken == "" {
-			return nil, fmt.Errorf("CC_ACCOUNTS[%d] (%s): refreshToken is required", i, c.Name)
+			return nil, fmt.Errorf("accounts[%d] (%s): refreshToken is required", i, c.Name)
 		}
 		var tok *Token
 		if c.AccessToken != "" && c.ExpiresAt > 0 {

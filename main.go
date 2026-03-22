@@ -25,6 +25,7 @@ func main() {
 
 // run initialises and starts the proxy. It blocks until a signal or server error.
 func run() error {
+	accountsFile := envOrDefault("CC_ACCOUNTS_FILE", "accounts.json")
 	port := envOrDefault("CC_PROXY_PORT", "9999")
 	logPath := envOrDefault("CC_LOG_PATH", "logs/proxy.log")
 
@@ -42,23 +43,10 @@ func run() error {
 	}
 	defer l.Close()
 
-	// Parse accounts — file takes precedence over env var
-	accountsFile := os.Getenv("CC_ACCOUNTS_FILE")
-	var accts []*accounts.Account
-	if accountsFile != "" {
-		accts, err = accounts.ParseAccountsFile(accountsFile)
-		if err != nil {
-			return fmt.Errorf("accounts file: %w", err)
-		}
-	} else {
-		ccAccounts := os.Getenv("CC_ACCOUNTS")
-		if ccAccounts == "" {
-			return fmt.Errorf("CC_ACCOUNTS or CC_ACCOUNTS_FILE is required")
-		}
-		accts, err = accounts.ParseAccounts(ccAccounts)
-		if err != nil {
-			return fmt.Errorf("accounts: %w", err)
-		}
+	// Parse accounts from file
+	accts, err := accounts.ParseAccountsFile(accountsFile)
+	if err != nil {
+		return fmt.Errorf("accounts: %w", err)
 	}
 
 	pool := accounts.NewPool(accts)
@@ -81,9 +69,7 @@ func run() error {
 	})
 
 	// Persist rotated tokens back to the accounts file so restarts don't lose them
-	if accountsFile != "" {
-		pool.WatchRotations(accountsFile)
-	}
+	pool.WatchRotations(accountsFile)
 
 	log.Printf("[cc-relay-proxy] starting on :%s with %d account(s)", port, len(accts))
 
@@ -96,16 +82,10 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Startup pings (background)
 	go srv.Pinger().StartupPing(ctx)
-
-	// Periodic pings
 	go srv.Pinger().Run(ctx)
-
-	// Auto-tuner
 	go t.Run(ctx)
 
-	// HTTP server
 	httpSrv := &http.Server{
 		Addr:         ":" + port,
 		Handler:      srv.Handler(),
