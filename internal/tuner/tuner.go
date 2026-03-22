@@ -76,13 +76,19 @@ func (t *Tuner) analyze() {
 		return // not enough data
 	}
 
+	params := t.pool.Params()
+
 	var (
-		total429        int
+		total429          int
 		prematureSwitches int
-		totalSwitches   int
-		allBlockedCount int
-		recoveryTimes   []float64
-		windowHours     = 24.0
+		totalSwitches     int
+		allBlockedCount   int
+		recoveryTimes     []float64
+		windowHours       = 24.0
+		// 7d trend: sample early vs late in window
+		sevenDayEarly []float64
+		sevenDayLate  []float64
+		midWindow     = window.Add(12 * time.Hour)
 	)
 
 	// Track last switch time per account for recovery measurement
@@ -93,6 +99,7 @@ func (t *Tuner) analyze() {
 		data, _ := ev["data"].(map[string]any)
 		ts, _ := ev["ts"].(float64)
 		account, _ := ev["account"].(string)
+		evTime := time.UnixMilli(int64(ts))
 
 		switch event {
 		case "429_received":
@@ -106,16 +113,22 @@ func (t *Tuner) analyze() {
 			totalSwitches++
 			reason, _ := data["reason"].(string)
 			fiveHourBefore, _ := data["fiveHour_before"].(float64)
-			// A premature switch is one where 5h was below the warning zone
-			if reason == "threshold" && fiveHourBefore < 0.70 {
+			// Premature: switched before reaching 90% of the threshold
+			earlyThreshold := params.SwitchThreshold5h * 0.90
+			if reason == "threshold" && fiveHourBefore < earlyThreshold {
 				prematureSwitches++
 			}
 
-		case "all_blocked":
-			allBlockedCount++
-
 		case "rate_limit_update":
-			// Measure recovery: if this account was previously blocked and now status is allowed
+			// Collect 7d samples for trend analysis
+			if sd, ok := data["sevenDay"].(float64); ok {
+				if evTime.Before(midWindow) {
+					sevenDayEarly = append(sevenDayEarly, sd)
+				} else {
+					sevenDayLate = append(sevenDayLate, sd)
+				}
+			}
+			// Measure recovery: if this account was previously blocked and now allowed
 			status, _ := data["status"].(string)
 			if status == "allowed" {
 				if blockedAt, ok := lastBlocked[account]; ok {
@@ -125,10 +138,13 @@ func (t *Tuner) analyze() {
 					delete(lastBlocked, account)
 				}
 			}
+
+		case "all_blocked":
+			allBlockedCount++
 		}
 	}
 
-	old := t.pool.Params()
+	old := params // already read at top of analyze()
 	p := old
 	var reasons []string
 
@@ -164,7 +180,32 @@ func (t *Tuner) analyze() {
 		}
 	}
 
-	// Rule 4: all-blocked events > 3 → warning
+	// Rule 4: 7d utilization trending up steeply → increase weight7d to prefer
+	// accounts with more 7d headroom, and log a warning
+	if len(sevenDayEarly) > 0 && len(sevenDayLate) > 0 {
+		earlyAvg := average(sevenDayEarly)
+		lateAvg := average(sevenDayLate)
+		growthPer12h := lateAvg - earlyAvg
+		// If 7d grew > 0.05 per 12h, that's ~0.10/day — at this rate cap in ~4 days from 50%
+		if growthPer12h > 0.05 {
+			delta := 0.10
+			p.Weight7d = clamp(p.Weight7d+delta, 0.01, 0.90)
+			p.Weight5h = clamp(p.Weight5h-delta, 0.10, 0.99)
+			sum := p.Weight5h + p.Weight7d
+			p.Weight5h /= sum
+			p.Weight7d /= sum
+			reasons = append(reasons, sprintf("7d growing %.3f/12h → weight7d↑ to prioritize headroom", growthPer12h))
+		}
+		if lateAvg > 0.80 {
+			t.log.Log("warning", "", map[string]any{
+				"code":    "7d_critical",
+				"message": sprintf("7d utilization at %.0f%% — limit imminent", lateAvg*100),
+				"sevenDay": lateAvg,
+			})
+		}
+	}
+
+	// Rule 5: all-blocked events > 3 → warning
 	if allBlockedCount > 3 {
 		t.log.Log("warning", "", map[string]any{
 			"code":    "insufficient_accounts",

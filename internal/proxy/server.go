@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"github.com/in-jun/cc-relay-proxy/internal/accounts"
 	"github.com/in-jun/cc-relay-proxy/internal/logger"
 )
+
+var debugMode = os.Getenv("CC_LOG_LEVEL") == "debug"
 
 const (
 	AnthropicTarget = "https://api.anthropic.com"
@@ -238,14 +241,15 @@ func (s *Server) sendRequest(r *http.Request, bodyBuf []byte, tok string) (*http
 	}
 	outReq.Header.Set("Authorization", "Bearer "+tok)
 
-	// Debug: log the token prefix and oauth-beta header being sent upstream
-	tokPfx := tok
-	if len(tokPfx) > 20 {
-		tokPfx = tokPfx[:20] + "..."
+	if debugMode {
+		tokPfx := tok
+		if len(tokPfx) > 20 {
+			tokPfx = tokPfx[:20] + "..."
+		}
+		log.Printf("[proxy] → %s %s | auth=Bearer %s | beta=%s",
+			r.Method, r.URL.Path, tokPfx,
+			outReq.Header.Get("anthropic-beta"))
 	}
-	log.Printf("[proxy] → %s %s | auth=Bearer %s | beta=%s",
-		r.Method, r.URL.Path, tokPfx,
-		outReq.Header.Get("anthropic-beta"))
 
 	resp, err := http.DefaultClient.Do(outReq)
 	if err != nil {
@@ -323,8 +327,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	accts := make([]acctStatus, len(acctSnaps))
 	for i, a := range acctSnaps {
 		rl := a.RateLimit
-		fiveReset := int(time.Until(rl.FiveHourReset).Minutes())
-		sevenReset := int(time.Until(rl.SevenDayReset).Hours())
+		fiveReset := maxInt(0, int(time.Until(rl.FiveHourReset).Minutes()))
+		sevenReset := maxInt(0, int(time.Until(rl.SevenDayReset).Hours()))
 		lastSeenStr := "never"
 		if !rl.LastSeen.IsZero() {
 			lastSeenStr = formatAgo(time.Since(rl.LastSeen))
@@ -375,6 +379,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	enc.Encode(status)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func formatAgo(d time.Duration) string {
