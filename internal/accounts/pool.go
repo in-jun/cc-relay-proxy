@@ -292,14 +292,57 @@ func (p *Pool) RateLimitFor(name string) RateLimit {
 	return RateLimit{}
 }
 
+const (
+	window5hMins  = 5 * 60   // 300 minutes in a 5h quota window
+	window7dHours = 7 * 24   // 168 hours in a 7d quota window
+)
+
+// timeDecay returns a [0,1] multiplier representing how much of a reset window
+// remains. At reset time the factor is 0 (treat quota as fully recovered); with
+// the full window remaining the factor is 1 (no discount). This lets WaterScore
+// distinguish an account at 90% utilization that resets in 10 minutes from one
+// that won't reset for 4 hours — the former is nearly free and should be preferred.
+func timeDecay5h(reset time.Time) float64 {
+	if reset.IsZero() {
+		return 1.0 // no data → assume worst case (no discount)
+	}
+	minsLeft := time.Until(reset).Minutes()
+	if minsLeft <= 0 {
+		return 0.0 // already past reset → fully recovered
+	}
+	if minsLeft >= window5hMins {
+		return 1.0 // full window remaining → no discount
+	}
+	return minsLeft / window5hMins
+}
+
+func timeDecay7d(reset time.Time) float64 {
+	if reset.IsZero() {
+		return 1.0
+	}
+	hoursLeft := time.Until(reset).Hours()
+	if hoursLeft <= 0 {
+		return 0.0
+	}
+	if hoursLeft >= window7dHours {
+		return 1.0
+	}
+	return hoursLeft / window7dHours
+}
+
 // WaterScore computes the water-filling score for an account (lower = preferred).
-// Uses max(5h_util/threshold, 7d_util/hardBlock) so routing naturally equalizes
-// utilization across both dimensions simultaneously.
+//
+// Score = max(effective_5h / threshold, effective_7d / hardBlock) where each
+// effective utilization is the raw utilization discounted by the fraction of the
+// reset window remaining. An account at 90% 5h utilization that resets in 10
+// minutes scores ~3× lower than one with the same utilization that resets in 4
+// hours, because the former is nearly free.
+//
 // Exported so callers outside the package (e.g. the proxy logger) can include
 // the score in structured log events without reimplementing the formula.
 func WaterScore(rl RateLimit, params Params) float64 {
-	s5h := rl.FiveHourUtil / params.SwitchThreshold5h
-	s7d := rl.SevenDayUtil / params.HardBlock7d
+	s5h := (rl.FiveHourUtil * timeDecay5h(rl.FiveHourReset)) / params.SwitchThreshold5h
+	s7d := (rl.SevenDayUtil * timeDecay7d(rl.SevenDayReset)) / params.HardBlock7d
 	if s5h > s7d {
 		return s5h
 	}
@@ -311,10 +354,28 @@ func (p *Pool) WaterScoreFor(name string) float64 {
 	return WaterScore(p.RateLimitFor(name), p.Params())
 }
 
+// isBlocked reports whether an account is ineligible for selection.
+// An account that is over its static utilization threshold is NOT considered
+// blocked if its reset window arrives within the next 2 minutes — SelectBest
+// will include it as a candidate so a request can be served the moment it
+// resets, rather than waiting for the next ping cycle to notice the change.
+const nearResetGrace = 2 * time.Minute
+
 func isBlocked(rl RateLimit, params Params) bool {
-	return rl.Status == "rejected" ||
-		rl.FiveHourUtil >= params.SwitchThreshold5h ||
-		rl.SevenDayUtil >= params.HardBlock7d
+	if rl.Status == "rejected" {
+		return true
+	}
+	// 5h over threshold: blocked unless reset is imminent
+	if rl.FiveHourUtil >= params.SwitchThreshold5h {
+		if rl.FiveHourReset.IsZero() || time.Until(rl.FiveHourReset) > nearResetGrace {
+			return true
+		}
+	}
+	// 7d hard-blocked: almost always stuck for hours/days, so no grace period
+	if rl.SevenDayUtil >= params.HardBlock7d {
+		return true
+	}
+	return false
 }
 
 // SelectBest chooses the best account using a water-filling algorithm with
@@ -374,16 +435,20 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 		}
 
 		// Priority 4: all alternatives are also blocked — caution fallback.
-		// Pick lowest 5h among non-rejected accounts.
+		// Pick lowest effective 5h (utilization × time-decay) among non-rejected accounts
+		// so that an account near its reset is preferred over one stuck for hours.
 		cautionIdx := -1
 		bestUtil := math.MaxFloat64
 		for i, a := range p.accounts {
 			a.mu.RLock()
 			rl := a.rateLimit
 			a.mu.RUnlock()
-			if rl.Status != "rejected" && rl.FiveHourUtil < bestUtil {
-				bestUtil = rl.FiveHourUtil
-				cautionIdx = i
+			if rl.Status != "rejected" {
+				effective := rl.FiveHourUtil * timeDecay5h(rl.FiveHourReset)
+				if effective < bestUtil {
+					bestUtil = effective
+					cautionIdx = i
+				}
 			}
 		}
 		if cautionIdx >= 0 && cautionIdx != p.active {
