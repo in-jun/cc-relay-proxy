@@ -380,6 +380,87 @@ func TestAnalyze7dTrendFires(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSkipsMalformedTsEvents(t *testing.T) {
+	// Event without a valid float64 "ts" hits the `if !ok { continue }` path.
+	pool := makeTestPool()
+	f, _ := os.CreateTemp("", "tuner-malf-*.jsonl")
+	f.Close()
+	path := f.Name()
+	defer os.Remove(path)
+
+	// Write one event with ts=string (invalid type) plus 100 normal events.
+	var events []map[string]any
+	events = append(events, map[string]any{
+		"ts":    "not-a-number", // triggers the !ok continue
+		"event": "request",
+	})
+	now := time.Now()
+	for i := 0; i < 100; i++ {
+		events = append(events, map[string]any{
+			"ts":    now.Add(-time.Duration(i) * time.Minute).UnixMilli(),
+			"event": "request",
+			"data":  map[string]any{"method": "POST"},
+		})
+	}
+	writeRawEvents(t, path, events)
+
+	l, err := logger.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	oldParams := pool.Params()
+	tu := New(pool, l, time.Hour)
+	tu.analyze() // must not panic; malformed event is skipped
+
+	// No rules fire (no switches, no 429s) → params unchanged
+	if pool.Params() != oldParams {
+		t.Error("params should not change with only request events")
+	}
+}
+
+func TestAnalyzeNoChangeWhenClamped(t *testing.T) {
+	// Rule 1 fires (premature switches > 20%, low 429 rate) but the threshold
+	// is already at the max (0.98), so clamping keeps it identical.
+	// paramsEqual(old, p) returns true → early return without logging.
+	pool := makeTestPool()
+	l, cleanup := makeTestLogger(t)
+	defer cleanup()
+
+	// Force threshold to maximum so Rule 1 cannot raise it further.
+	pool.SetParams(accounts.Params{
+		SwitchThreshold5h: 0.98,
+		HardBlock7d:       0.90,
+		Weight5h:          0.80,
+		Weight7d:          0.20,
+	})
+	oldParams := pool.Params()
+
+	// 100 padding events
+	for i := 0; i < 100; i++ {
+		l.Log("request", "a1", map[string]any{"method": "POST"})
+	}
+	// 40 premature switches (>20% of total): fiveHour_before = 0.10 < 0.98*0.90 = 0.882
+	for i := 0; i < 40; i++ {
+		l.Log("account_switched", "a2", map[string]any{
+			"from":            "a1",
+			"to":              "a2",
+			"reason":          "threshold: early",
+			"fiveHour_before": 0.10,
+		})
+	}
+	// 0 429s → rate = 0 < 0.1 → Rule 1 fires, tries to raise by 0.03 → clamped to 0.98
+
+	tu := New(pool, l, time.Hour)
+	tu.analyze()
+
+	newParams := pool.Params()
+	if newParams != oldParams {
+		t.Errorf("params should not change when clamping neutralizes Rule 1; old=%v new=%v", oldParams, newParams)
+	}
+}
+
 func TestAnalyzeExported(t *testing.T) {
 	// Verify that the exported Analyze() wrapper delegates to analyze().
 	pool := makeTestPool()
