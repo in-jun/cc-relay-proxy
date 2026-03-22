@@ -41,11 +41,12 @@ type TunerHistory interface {
 
 // Server is the reverse proxy HTTP server.
 type Server struct {
-	pool   *accounts.Pool
-	log    *logger.Logger
-	stats  Stats
-	target *url.URL
-	pinger *Pinger
+	pool    *accounts.Pool
+	log     *logger.Logger
+	stats   Stats
+	target  *url.URL
+	pinger  *Pinger
+	bgCtx   context.Context // long-lived context for background work (pings etc.)
 }
 
 // New creates a Server.
@@ -55,6 +56,7 @@ func New(pool *accounts.Pool, l *logger.Logger) *Server {
 		pool:   pool,
 		log:    l,
 		target: target,
+		bgCtx:  context.Background(),
 	}
 	s.stats.StartTime = time.Now()
 	s.pinger = NewPinger(pool, l, s)
@@ -104,7 +106,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"fiveHour_before": prevRL.FiveHourUtil,
 		})
 		// Ping the previous account in background to measure its recovery speed
-		go s.pinger.PingAfterSwitch(r.Context(), prevAccount)
+		go s.pinger.PingAfterSwitch(s.bgCtx, prevAccount)
 	}
 
 	maxAttempts := len(s.pool.Accounts()) + 2
@@ -155,7 +157,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 					"fiveHour": rl.FiveHourUtil,
 				})
 				// Ping previous account in background to measure recovery speed
-				go s.pinger.PingAfterSwitch(r.Context(), prev429Account)
+				go s.pinger.PingAfterSwitch(s.bgCtx, prev429Account)
 				accountName = nextName
 				continue
 			}
