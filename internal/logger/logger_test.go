@@ -190,3 +190,43 @@ func TestRotation(t *testing.T) {
 		t.Error("rotated file not created")
 	}
 }
+
+func TestNewMkdirFails(t *testing.T) {
+	// New() returns an error when MkdirAll fails.
+	// Use an existing regular file as the "directory" component so MkdirAll fails.
+	f, err := os.CreateTemp("", "logger-not-a-dir-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	defer os.Remove(f.Name())
+
+	// f.Name() is a regular file; using it as a directory makes MkdirAll fail.
+	badPath := f.Name() + "/sub/log.jsonl"
+	_, err = New(badPath)
+	if err == nil {
+		t.Fatal("expected error when MkdirAll fails (path component is a file)")
+	}
+}
+
+func TestNewOpenFileFails(t *testing.T) {
+	// New() returns an error when OpenFile fails (read-only directory).
+	dir, err := os.MkdirTemp("", "logger-readonly-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		os.Chmod(dir, 0o755) // restore before cleanup
+		os.RemoveAll(dir)
+	}()
+
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	path := dir + "/log.jsonl"
+	_, err = New(path)
+	if err == nil {
+		t.Fatal("expected error when OpenFile fails in read-only directory")
+	}
+}
