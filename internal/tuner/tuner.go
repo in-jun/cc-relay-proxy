@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/in-jun/cc-relay-proxy/internal/accounts"
@@ -24,6 +25,7 @@ type Tuner struct {
 	pool      *accounts.Pool
 	log       *logger.Logger
 	interval  time.Duration
+	mu        sync.RWMutex // protects history and lastTuned
 	history   []TuneHistory
 	lastTuned time.Time
 }
@@ -32,7 +34,11 @@ type Tuner struct {
 func (t *Tuner) Interval() time.Duration { return t.interval }
 
 // LastTuned returns when the tuner last ran (zero if never).
-func (t *Tuner) LastTuned() time.Time { return t.lastTuned }
+func (t *Tuner) LastTuned() time.Time {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.lastTuned
+}
 
 // New creates a Tuner. interval is how often to run analysis.
 func New(pool *accounts.Pool, l *logger.Logger, interval time.Duration) *Tuner {
@@ -46,6 +52,8 @@ func New(pool *accounts.Pool, l *logger.Logger, interval time.Duration) *Tuner {
 
 // History returns a snapshot of recorded parameter changes.
 func (t *Tuner) History() []TuneHistory {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	if len(t.history) == 0 {
 		return []TuneHistory{}
 	}
@@ -237,14 +245,16 @@ func (t *Tuner) analyze() {
 	})
 
 	t.pool.SetParams(p)
-	t.lastTuned = time.Now()
 
+	t.mu.Lock()
+	t.lastTuned = time.Now()
 	t.history = append(t.history, TuneHistory{
 		Ts:     time.Now().UnixMilli(),
 		Reason: reason,
 		Old:    old,
 		New:    p,
 	})
+	t.mu.Unlock()
 
 	log.Printf("[tuner] params updated: %s", reason)
 }
