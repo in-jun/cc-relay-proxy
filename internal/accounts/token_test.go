@@ -305,4 +305,19 @@ func TestExpiresIn(t *testing.T) {
 	if s != "30m" {
 		t.Errorf("want 30m, got %s", s)
 	}
+
+	// Expired: accessToken set but expiresAt is in the past.
+	tok.expiresAt = time.Now().Add(-1 * time.Minute)
+	s = tok.ExpiresIn()
+	if s != "expired" {
+		t.Errorf("want 'expired', got %s", s)
+	}
+}
+
+func TestSetTokenEndpoint(t *testing.T) {
+	prev := SetTokenEndpoint("http://test.example.com")
+	defer SetTokenEndpoint(prev)
+	if tokenEndpoint != "http://test.example.com" {
+		t.Errorf("SetTokenEndpoint should update tokenEndpoint, got %s", tokenEndpoint)
+	}
 }

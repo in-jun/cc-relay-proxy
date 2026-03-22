@@ -25,8 +25,13 @@ const (
 // tokenEndpoint is the URL used by refresh(). Overridable in tests.
 var tokenEndpoint = TokenURL
 
-// SetTokenEndpoint overrides the OAuth token endpoint. For use in tests only.
-func SetTokenEndpoint(url string) { tokenEndpoint = url }
+// SetTokenEndpoint overrides the OAuth token endpoint. Returns the previous value.
+// For use in tests only.
+func SetTokenEndpoint(url string) string {
+	prev := tokenEndpoint
+	tokenEndpoint = url
+	return prev
+}
 
 // RefreshCallback is called after a successful token refresh.
 // Used by the pool to emit token_refreshed log events.

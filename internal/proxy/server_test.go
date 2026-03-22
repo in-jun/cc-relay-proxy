@@ -689,6 +689,112 @@ func TestSendRequestDebugModeLongToken(t *testing.T) {
 	}
 }
 
+func TestPingAccountTokenError(t *testing.T) {
+	// pingAccount with an unknown account name → TokenFor returns error → log error, return.
+	// Covers lines 150-153 (token error path in pingAccount).
+	pool := newSeededTestPool(t)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, "http://127.0.0.1:1") // won't be reached
+	p := NewPinger(pool, l, srv)
+
+	// "ghost" is not in the pool → TokenFor returns "account not found" error.
+	p.pingAccount(context.Background(), "ghost")
+	// No assertion needed — we're just ensuring no panic and the error path runs.
+}
+
+func TestStartupPing(t *testing.T) {
+	// StartupPing spawns one goroutine per account. Each goroutine calls pingAccount.
+	// We set tokenEndpoint to a server returning invalid_grant so pingAccount hits
+	// the token error path and returns quickly without reaching the real Anthropic API.
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer failSrv.Close()
+
+	orig := accounts.SetTokenEndpoint(failSrv.URL)
+	defer accounts.SetTokenEndpoint(orig)
+
+	// Non-seeded pool: Ensure will call refresh → invalid_grant → token error.
+	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1"}]`)
+	pool := accounts.NewPool(accts)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	p := NewPinger(pool, l, srv)
+
+	p.StartupPing(context.Background())
+	// Give the goroutine time to complete the token refresh attempt.
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestRunContextCancelled(t *testing.T) {
+	// Run exits immediately when context is cancelled (covers ctx.Done() branch).
+	pool := newSeededTestPool(t)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	p := NewPinger(pool, l, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before Run is even called
+
+	done := make(chan struct{})
+	go func() {
+		p.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Run returned promptly after ctx was cancelled.
+	case <-time.After(2 * time.Second):
+		t.Error("Run did not return after context cancellation")
+	}
+}
+
+func TestCheckAndPingResets(t *testing.T) {
+	// checkAndPingResets pings accounts whose 5h reset has passed.
+	// We set up one account with rejected status and a reset time in the past,
+	// then use a failing tokenEndpoint so pingAccount returns quickly.
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer failSrv.Close()
+
+	orig := accounts.SetTokenEndpoint(failSrv.URL)
+	defer accounts.SetTokenEndpoint(orig)
+
+	// Non-seeded account so token refresh is needed.
+	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1"}]`)
+	pool := accounts.NewPool(accts)
+
+	// Mark account as rejected with reset time 1 minute in the past.
+	pastReset := time.Now().Add(-1 * time.Minute)
+	pool.UpdateRateLimit("a1", accounts.RateLimit{
+		Status:        "rejected",
+		FiveHourUtil:  1.0,
+		FiveHourReset: pastReset,
+	})
+
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	p := NewPinger(pool, l, srv)
+
+	scheduled := map[string]time.Time{}
+	p.checkAndPingResets(context.Background(), scheduled)
+
+	// Account should now be tracked in scheduled.
+	if _, ok := scheduled["a1"]; !ok {
+		t.Error("a1 should be added to scheduled after reset-ping")
+	}
+
+	// Second call with same scheduled map should skip (already tracked).
+	p.checkAndPingResets(context.Background(), scheduled)
+
+	// Give the goroutine time to hit the token refresh path.
+	time.Sleep(50 * time.Millisecond)
+}
+
 func TestProxyLoopExhausted502(t *testing.T) {
 	// Pool with 1 account; upstream always returns 429 with rejected status
 	// and a reset 2s in the future. maxAttempts=3 (1+2). Each iteration holds
