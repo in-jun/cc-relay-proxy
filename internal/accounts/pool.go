@@ -128,10 +128,22 @@ func (p *Pool) ActiveName() string {
 
 // ActiveToken returns a valid access token for the current active account.
 func (p *Pool) ActiveToken(ctx context.Context) (string, error) {
+	tok, _, err := p.ActiveTokenWithName(ctx)
+	return tok, err
+}
+
+// ActiveTokenWithName returns both a valid access token and the account name,
+// capturing them together under the same read lock to prevent mismatches if
+// another goroutine switches the active account between separate calls.
+func (p *Pool) ActiveTokenWithName(ctx context.Context) (token, name string, err error) {
 	p.mu.RLock()
 	acct := p.accounts[p.active]
+	name = acct.Name
 	p.mu.RUnlock()
-	return acct.token.Ensure(ctx)
+	// Ensure is called outside the lock (it may block during token refresh).
+	// The account pointer is stable — accounts are never removed or replaced.
+	token, err = acct.token.Ensure(ctx)
+	return
 }
 
 // TokenFor returns a valid access token for a named account.
