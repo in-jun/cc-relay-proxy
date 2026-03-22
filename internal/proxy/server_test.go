@@ -544,6 +544,42 @@ func TestProxyHoldContextCancelled(t *testing.T) {
 	// No response code assertion — handler returns without writing when ctx is done.
 }
 
+func TestProxyTokenError(t *testing.T) {
+	// Make the OAuth token endpoint return an error (invalid_grant) so that
+	// Ensure() fails → ActiveTokenWithName returns an error → handleProxy
+	// returns 502 with "token unavailable".
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer tokenSrv.Close()
+
+	// Set the token endpoint to our fake server and restore after the test.
+	accounts.SetTokenEndpoint(tokenSrv.URL)
+	defer accounts.SetTokenEndpoint(accounts.TokenURL)
+
+	// Use a non-seeded pool so Ensure must refresh.
+	pool := newTestPool()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("want 502 on token refresh failure, got %d", w.Code)
+	}
+}
+
 func TestSendRequestDebugMode(t *testing.T) {
 	// Temporarily enable debug logging to cover the debugMode branch in sendRequest.
 	old := debugMode
