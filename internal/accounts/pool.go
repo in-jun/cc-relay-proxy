@@ -273,7 +273,7 @@ func (p *Pool) SoonestReset() time.Time {
 		a.mu.RLock()
 		t := a.rateLimit.FiveHourReset
 		a.mu.RUnlock()
-		if soonest.IsZero() || (!t.IsZero() && t.Before(soonest)) {
+		if !t.IsZero() && (soonest.IsZero() || t.Before(soonest)) {
 			soonest = t
 		}
 	}
