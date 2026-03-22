@@ -21,6 +21,17 @@ import (
 
 var debugMode = os.Getenv("CC_LOG_LEVEL") == "debug"
 
+// upstreamClient is a shared HTTP client tuned for reverse-proxy use:
+// larger connection pool so keep-alive connections are reused across concurrent
+// requests without waiting for a new TLS handshake on every call.
+var upstreamClient = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 const (
 	AnthropicTarget = "https://api.anthropic.com"
 	ProxyHoldMax    = 9*time.Minute + 50*time.Second
@@ -292,7 +303,7 @@ func (s *Server) sendRequest(r *http.Request, bodyBuf []byte, tok string) (*http
 			outReq.Header.Get("anthropic-beta"))
 	}
 
-	resp, err := http.DefaultClient.Do(outReq)
+	resp, err := upstreamClient.Do(outReq)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -319,7 +330,7 @@ func (s *Server) DoUpstreamRequest(ctx context.Context, tok, path string, body [
 	req.Header.Set("anthropic-version", "2023-06-01")
 	// OAuth tokens require this beta header — without it the API returns 401
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-	return http.DefaultClient.Do(req)
+	return upstreamClient.Do(req)
 }
 
 func isSSE(resp *http.Response) bool {
