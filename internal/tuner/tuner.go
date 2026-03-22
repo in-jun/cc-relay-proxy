@@ -79,6 +79,9 @@ func (t *Tuner) Run(ctx context.Context) {
 	}
 }
 
+// Analyze runs a single analysis cycle immediately. Exported for testing.
+func (t *Tuner) Analyze() { t.analyze() }
+
 // analyze is the core analysis and adjustment function.
 func (t *Tuner) analyze() {
 	lines := t.log.ReadLines()

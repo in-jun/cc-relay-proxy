@@ -101,6 +101,30 @@ func TestReadLinesFromRotatedFile(t *testing.T) {
 	}
 }
 
+func TestReadLinesMalformedJSON(t *testing.T) {
+	f, _ := os.CreateTemp("", "proxy-log-*.jsonl")
+	f.Close()
+	path := f.Name()
+	defer os.Remove(path)
+
+	l, _ := New(path)
+	defer l.Close()
+
+	// Write one valid line then malformed JSON directly to the file.
+	l.Log("startup", "", map[string]any{"ok": true})
+	// Append garbage after a valid line so the decoder hits a decode error.
+	os.WriteFile(path, append(func() []byte {
+		data, _ := os.ReadFile(path)
+		return data
+	}(), []byte("not-valid-json\n")...), 0o644)
+
+	lines := l.ReadLines()
+	// Should get 1 valid line; malformed entry is silently skipped.
+	if len(lines) != 1 {
+		t.Fatalf("want 1 valid line (malformed skipped), got %d", len(lines))
+	}
+}
+
 func TestRotation(t *testing.T) {
 	f, _ := os.CreateTemp("", "proxy-log-*.jsonl")
 	f.Close()
