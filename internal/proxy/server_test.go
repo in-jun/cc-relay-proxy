@@ -1141,3 +1141,79 @@ func TestDoUpstreamRequestCancelledContext(t *testing.T) {
 		t.Fatal("expected error from DoUpstreamRequest with cancelled context")
 	}
 }
+
+func TestProxyStripsXApiKeyAndAddsOAuthHeaders(t *testing.T) {
+	// Verifies that when a client sends x-api-key (API key mode), the proxy:
+	// 1. Removes the x-api-key header
+	// 2. Sets Authorization: Bearer <real-token>
+	// 3. Adds anthropic-beta: oauth-2025-04-20 if missing
+	var gotXApiKey, gotAuth, gotBeta string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotXApiKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("Authorization")
+		gotBeta = r.Header.Get("anthropic-beta")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"type":"message"}`))
+	}))
+	defer upstream.Close()
+
+	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"real_token","expiresAt":9999999999999}]`)
+	pool := accounts.NewPool(accts)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("x-api-key", "fake-api-key")  // API key mode
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	if gotXApiKey != "" {
+		t.Errorf("x-api-key should be stripped, got: %q", gotXApiKey)
+	}
+	if gotAuth != "Bearer real_token" {
+		t.Errorf("Authorization should be set to real token, got: %q", gotAuth)
+	}
+	if !strings.Contains(gotBeta, "oauth-2025-04-20") {
+		t.Errorf("anthropic-beta should contain oauth-2025-04-20, got: %q", gotBeta)
+	}
+}
+
+func TestProxyPreservesExistingBetaHeader(t *testing.T) {
+	// When client sends anthropic-beta with other flags (OAuth mode),
+	// oauth-2025-04-20 should be appended, not replace the existing value.
+	var gotBeta string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBeta = r.Header.Get("anthropic-beta")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"type":"message"}`))
+	}))
+	defer upstream.Close()
+
+	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"real_token","expiresAt":9999999999999}]`)
+	pool := accounts.NewPool(accts)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer client_oauth_token")
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20,some-other-feature")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	// oauth-2025-04-20 already present — should not be duplicated
+	count := strings.Count(gotBeta, "oauth-2025-04-20")
+	if count != 1 {
+		t.Errorf("oauth-2025-04-20 should appear exactly once, got %d times in %q", count, gotBeta)
+	}
+	if !strings.Contains(gotBeta, "some-other-feature") {
+		t.Errorf("existing beta flags should be preserved, got: %q", gotBeta)
+	}
+}

@@ -291,7 +291,19 @@ func (s *Server) sendRequest(r *http.Request, bodyBuf []byte, tok string) (*http
 			outReq.Header.Add(k, v)
 		}
 	}
+	// Strip x-api-key if present (API key mode) — always use OAuth Bearer.
+	outReq.Header.Del("x-api-key")
 	outReq.Header.Set("Authorization", "Bearer "+tok)
+	// Ensure oauth-2025-04-20 beta flag is present so the API accepts OAuth tokens
+	// even when the client sent an API key (which omits the beta header).
+	existing := outReq.Header.Get("anthropic-beta")
+	if !strings.Contains(existing, "oauth-2025-04-20") {
+		if existing == "" {
+			outReq.Header.Set("anthropic-beta", "oauth-2025-04-20")
+		} else {
+			outReq.Header.Set("anthropic-beta", existing+",oauth-2025-04-20")
+		}
+	}
 
 	if debugMode {
 		tokPfx := tok
