@@ -5,13 +5,15 @@
 cc-relay-proxy
 cc-relay-proxy.exe
 
-# Runtime logs
+# Runtime state (contain tokens/logs — never commit)
 logs/
+accounts.json
 
 # Go toolchain
 *.test
 *.out
+*.html
 
-# Env files (contain refresh tokens)
+# Env / secret files
 .env
 *.env
