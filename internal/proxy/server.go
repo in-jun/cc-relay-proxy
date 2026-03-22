@@ -123,6 +123,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		resp, rawBody, err := s.sendRequest(r, bodyBuf, tok)
 		if err != nil {
 			log.Printf("[proxy] upstream error: %v", err)
+			s.log.Log("error", accountName, map[string]any{"code": "upstream_error", "msg": err.Error()})
 			http.Error(w, "proxy: upstream error", http.StatusBadGateway)
 			return
 		}
