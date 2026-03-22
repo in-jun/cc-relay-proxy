@@ -1015,3 +1015,96 @@ func TestPingAccountSuccess(t *testing.T) {
 		t.Errorf("want status=allowed after ping, got %q", rl.Status)
 	}
 }
+
+func TestProxy401TriggersRefreshAndRetries(t *testing.T) {
+	// When the upstream returns 401, the proxy should:
+	//   1. Log the 401 event (api_401_token_invalidated)
+	//   2. Invalidate the cached token for the account
+	//   3. Retry — Ensure refreshes the token
+	//   4. Succeed on the next attempt (200)
+	//
+	// We simulate this with a fake upstream that returns 401 on the first call
+	// then 200 on subsequent calls, and a fake token endpoint that returns
+	// a fresh access token on refresh.
+
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			// First call: reject the old token
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"Invalid token"}}`))
+		} else {
+			// Subsequent calls: accept (after token refresh)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"type":"message","id":"msg_ok"}`))
+		}
+	}))
+	defer upstream.Close()
+
+	// Token endpoint returns a fresh access token on refresh.
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"access_token":"fresh_tok","refresh_token":"new_rt","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+
+	orig := accounts.SetTokenEndpoint(tokenSrv.URL)
+	defer accounts.SetTokenEndpoint(orig)
+
+	// Non-seeded pool: first Ensure triggers a refresh to get the initial token.
+	// After 401, Invalidate clears the token so Ensure refreshes again.
+	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1"}]`)
+	pool := accounts.NewPool(accts)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200 after 401+refresh retry, got %d\nbody: %s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Errorf("want at least 2 upstream calls (one 401, one success), got %d", calls)
+	}
+}
+
+func TestProxyInvalidateToken(t *testing.T) {
+	// Pool.InvalidateToken clears the access token, causing Ensure to refresh.
+	accts, _ := accounts.ParseAccounts(`[
+		{"name":"a1","refreshToken":"rt1","accessToken":"old_tok","expiresAt":9999999999999}
+	]`)
+	pool := accounts.NewPool(accts)
+
+	// Verify token is initially set.
+	tok1, err := pool.TokenFor(context.Background(), "a1")
+	if err != nil || tok1 != "old_tok" {
+		t.Fatalf("expected old_tok, got %q err=%v", tok1, err)
+	}
+
+	// After invalidate, the token should be cleared.
+	pool.InvalidateToken("a1")
+
+	// Token endpoint returns a fresh token on refresh.
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"access_token":"fresh_tok","refresh_token":"new_rt","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+	orig := accounts.SetTokenEndpoint(tokenSrv.URL)
+	defer accounts.SetTokenEndpoint(orig)
+
+	tok2, err := pool.TokenFor(context.Background(), "a1")
+	if err != nil {
+		t.Fatalf("expected fresh token after invalidate+refresh, got error: %v", err)
+	}
+	if tok2 != "fresh_tok" {
+		t.Errorf("want fresh_tok, got %q", tok2)
+	}
+}

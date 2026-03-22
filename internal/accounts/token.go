@@ -180,6 +180,15 @@ func isPermError(err error) bool {
 		strings.Contains(s, "status 401")
 }
 
+// Invalidate clears the cached access token, forcing the next Ensure call
+// to perform a fresh token refresh. Called when the API returns 401.
+func (t *Token) Invalidate() {
+	t.mu.Lock()
+	t.accessToken = ""
+	t.expiresAt = time.Time{}
+	t.mu.Unlock()
+}
+
 // ExpiresAt returns when the current access token expires (zero if none).
 func (t *Token) ExpiresAt() time.Time {
 	t.mu.RLock()

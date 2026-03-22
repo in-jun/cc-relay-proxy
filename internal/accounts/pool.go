@@ -170,6 +170,24 @@ func (p *Pool) TokenFor(ctx context.Context, name string) (string, error) {
 	return acct.token.Ensure(ctx)
 }
 
+// InvalidateToken clears the cached access token for the named account,
+// forcing the next call to TokenFor/ActiveToken to perform a fresh refresh.
+// Used when the API returns 401 to recover without dropping the request.
+func (p *Pool) InvalidateToken(name string) {
+	p.mu.RLock()
+	var acct *Account
+	for _, a := range p.accounts {
+		if a.Name == name {
+			acct = a
+			break
+		}
+	}
+	p.mu.RUnlock()
+	if acct != nil {
+		acct.token.Invalidate()
+	}
+}
+
 // UpdateRateLimit records parsed rate limit headers for the named account.
 func (p *Pool) UpdateRateLimit(name string, rl RateLimit) {
 	p.mu.RLock()
