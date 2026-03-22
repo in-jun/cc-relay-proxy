@@ -34,11 +34,6 @@ type Stats struct {
 	StartTime     time.Time
 }
 
-// TunerHistory is the interface the status endpoint needs from the tuner.
-type TunerHistory interface {
-	History() []any
-}
-
 // Server is the reverse proxy HTTP server.
 type Server struct {
 	pool    *accounts.Pool
