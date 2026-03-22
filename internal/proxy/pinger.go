@@ -106,12 +106,19 @@ func (p *Pinger) StartupPing(ctx context.Context) {
 	p.emitPoolSnapshot("startup")
 }
 
+// tokenRefreshInterval controls how often we proactively refresh tokens for
+// all accounts, even those currently blocked by rate limits. This prevents
+// idle accounts from having expired tokens when their rate limit window resets.
+var tokenRefreshInterval = 30 * time.Minute
+
 // Run starts the periodic ping loop and the reset-watcher.
 func (p *Pinger) Run(ctx context.Context) {
 	ticker := time.NewTicker(pingInterval)
 	resetTicker := time.NewTicker(resetCheckInterval)
+	refreshTicker := time.NewTicker(tokenRefreshInterval)
 	defer ticker.Stop()
 	defer resetTicker.Stop()
+	defer refreshTicker.Stop()
 
 	// Track which accounts we've already scheduled a reset-ping for
 	scheduledReset := map[string]time.Time{}
@@ -124,8 +131,12 @@ func (p *Pinger) Run(ctx context.Context) {
 			p.pingAccount(ctx, p.pool.ActiveName())
 			p.emitPoolSnapshot("periodic")
 		case <-resetTicker.C:
-			// Ping accounts whose 5h reset window has arrived
+			// Ping accounts whose reset window has arrived
 			p.checkAndPingResets(ctx, scheduledReset)
+		case <-refreshTicker.C:
+			// Proactively refresh tokens for all accounts so blocked accounts
+			// don't have expired tokens when their rate limit window resets.
+			p.refreshAllTokens(ctx)
 		}
 	}
 }
@@ -133,23 +144,53 @@ func (p *Pinger) Run(ctx context.Context) {
 // checkAndPingResets pings blocked accounts whose reset time has passed.
 func (p *Pinger) checkAndPingResets(ctx context.Context, scheduled map[string]time.Time) {
 	now := time.Now()
+	params := p.pool.Params()
 	for _, snap := range p.pool.Accounts() {
 		rl := snap.RateLimit
-		// Only ping if account was blocked (status rejected or high util) and reset has passed
-		if rl.Status != "rejected" {
+
+		// Account must actually be blocked to warrant a reset-ping.
+		blocked := rl.Status == "rejected" ||
+			rl.FiveHourUtil >= params.SwitchThreshold5h ||
+			rl.SevenDayUtil >= params.HardBlock7d
+		if !blocked {
 			continue
 		}
-		reset := rl.FiveHourReset
-		if reset.IsZero() || reset.After(now) {
-			continue
+
+		// Find a reset time that has already passed.
+		// Prefer the 5h window (shorter) so we recover sooner.
+		var reset time.Time
+		if !rl.FiveHourReset.IsZero() && !rl.FiveHourReset.After(now) {
+			reset = rl.FiveHourReset
+		} else if !rl.SevenDayReset.IsZero() && !rl.SevenDayReset.After(now) {
+			reset = rl.SevenDayReset
+		} else {
+			continue // reset hasn't arrived yet
 		}
-		// Avoid pinging more than once per reset cycle
+
+		// Avoid pinging more than once per reset cycle.
 		if last, ok := scheduled[snap.Name]; ok && last.Equal(reset) {
 			continue
 		}
 		scheduled[snap.Name] = reset
 		log.Printf("[pinger] reset arrived for %s, pinging to confirm availability", snap.Name)
 		go p.pingAccount(ctx, snap.Name)
+	}
+}
+
+// refreshAllTokens proactively refreshes tokens for every account so that
+// blocked accounts have valid tokens ready when their rate limit resets.
+func (p *Pinger) refreshAllTokens(ctx context.Context) {
+	for _, snap := range p.pool.Accounts() {
+		if snap.IsActive {
+			continue // active account token is refreshed on every request
+		}
+		name := snap.Name
+		go func() {
+			if _, err := p.pool.TokenFor(ctx, name); err != nil {
+				log.Printf("[pinger] proactive token refresh failed for %s: %v", name, err)
+				p.log.Log("error", name, map[string]any{"code": "proactive_refresh_failed", "msg": err.Error()})
+			}
+		}()
 	}
 }
 
