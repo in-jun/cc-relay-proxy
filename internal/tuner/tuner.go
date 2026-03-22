@@ -176,13 +176,13 @@ func (t *Tuner) analyze() {
 	}
 	if prematureRatio > 0.20 && rate429 < 0.1 {
 		p.SwitchThreshold5h = clamp(p.SwitchThreshold5h+0.03, 0.50, 0.98)
-		reasons = append(reasons, sprintf("premature switch ratio %.0f%% → threshold +0.03", prematureRatio*100))
+		reasons = append(reasons, fmt.Sprintf("premature switch ratio %.0f%% → threshold +0.03", prematureRatio*100))
 	}
 
 	// Rule 2: 429 rate > 1.0/hour → lower threshold
 	if rate429 > 1.0 {
 		p.SwitchThreshold5h = clamp(p.SwitchThreshold5h-0.05, 0.50, 0.98)
-		reasons = append(reasons, sprintf("429 rate %.2f/hr → threshold -0.05", rate429))
+		reasons = append(reasons, fmt.Sprintf("429 rate %.2f/hr → threshold -0.05", rate429))
 	}
 
 	// Rule 3: average recovery < 60 minutes → increase weight5h, decrease weight7d
@@ -196,7 +196,7 @@ func (t *Tuner) analyze() {
 			sum := p.Weight5h + p.Weight7d
 			p.Weight5h /= sum
 			p.Weight7d /= sum
-			reasons = append(reasons, sprintf("avg recovery %.0fmin < 60min → weight5h↑ weight7d↓", avg))
+			reasons = append(reasons, fmt.Sprintf("avg recovery %.0fmin < 60min → weight5h↑ weight7d↓", avg))
 		}
 	}
 
@@ -214,12 +214,12 @@ func (t *Tuner) analyze() {
 			sum := p.Weight5h + p.Weight7d
 			p.Weight5h /= sum
 			p.Weight7d /= sum
-			reasons = append(reasons, sprintf("7d growing %.3f/12h → weight7d↑ to prioritize headroom", growthPer12h))
+			reasons = append(reasons, fmt.Sprintf("7d growing %.3f/12h → weight7d↑ to prioritize headroom", growthPer12h))
 		}
 		if lateAvg > 0.80 {
 			t.log.Log("warning", "", map[string]any{
 				"code":    "7d_critical",
-				"message": sprintf("7d utilization at %.0f%% — limit imminent", lateAvg*100),
+				"message": fmt.Sprintf("7d utilization at %.0f%% — limit imminent", lateAvg*100),
 				"sevenDay": lateAvg,
 			})
 		}
@@ -238,7 +238,7 @@ func (t *Tuner) analyze() {
 		return
 	}
 
-	reason := join(reasons, "; ")
+	reason := strings.Join(reasons, "; ")
 	t.log.Log("params_updated", "", map[string]any{
 		"old":    paramsMap(old),
 		"new":    paramsMap(p),
@@ -299,19 +299,3 @@ func paramsMap(p accounts.Params) map[string]any {
 	}
 }
 
-// sprintf wraps fmt.Sprintf.
-func sprintf(format string, args ...any) string {
-	return fmt.Sprintf(format, args...)
-}
-
-// join concatenates strings with sep.
-func join(parts []string, sep string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	out := parts[0]
-	for _, p := range parts[1:] {
-		out += sep + p
-	}
-	return out
-}
