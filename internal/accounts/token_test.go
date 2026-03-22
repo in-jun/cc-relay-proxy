@@ -314,6 +314,36 @@ func TestExpiresIn(t *testing.T) {
 	}
 }
 
+func TestTokenInvalidate(t *testing.T) {
+	// Invalidate clears accessToken and expiresAt so Ensure triggers a fresh refresh.
+	tok := &Token{
+		accessToken:  "valid_tok",
+		refreshToken: "rt",
+		expiresAt:    time.Now().Add(2 * time.Hour),
+	}
+	// Fast path returns the existing token before invalidation.
+	got, err := tok.Ensure(context.Background())
+	if err != nil || got != "valid_tok" {
+		t.Fatalf("pre-invalidate: want valid_tok, got %q err=%v", got, err)
+	}
+
+	tok.Invalidate()
+
+	tok.mu.RLock()
+	isEmpty := tok.accessToken == "" && tok.expiresAt.IsZero()
+	tok.mu.RUnlock()
+	if !isEmpty {
+		t.Error("Invalidate should clear accessToken and expiresAt")
+	}
+}
+
+func TestPoolInvalidateTokenUnknown(t *testing.T) {
+	// InvalidateToken on an unknown account name is a no-op (no panic).
+	accts, _ := ParseAccounts(`[{"name":"a1","refreshToken":"rt1"}]`)
+	pool := NewPool(accts)
+	pool.InvalidateToken("nonexistent") // must not panic
+}
+
 func TestSetTokenEndpoint(t *testing.T) {
 	prev := SetTokenEndpoint("http://test.example.com")
 	defer SetTokenEndpoint(prev)

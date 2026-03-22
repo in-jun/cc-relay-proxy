@@ -213,7 +213,21 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Success — stream response without buffering
+		// 401: token rejected by API — invalidate and retry with a fresh token.
+		// This handles the rare race where a token expires between Ensure and
+		// the actual network call, without surfacing the 401 to the client.
+		if resp.StatusCode == http.StatusUnauthorized {
+			resp.Body.Close()
+			log.Printf("[proxy] 401 from API for account %s — invalidating token and retrying", accountName)
+			s.log.Log("error", accountName, map[string]any{
+				"code":    "api_401_token_invalidated",
+				"attempt": attempt,
+			})
+			s.pool.InvalidateToken(accountName)
+			continue
+		}
+
+		// Success (or non-retryable error) — stream response without buffering
 		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 

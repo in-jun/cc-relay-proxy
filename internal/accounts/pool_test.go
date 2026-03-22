@@ -468,3 +468,31 @@ func TestDefaultParams(t *testing.T) {
 		t.Errorf("N=5: want 0.85, got %f", p5.SwitchThreshold5h)
 	}
 }
+
+func TestInvalidateToken(t *testing.T) {
+	accts, _ := ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999}]`)
+	pool := NewPool(accts)
+
+	// Confirm token is initially available.
+	got, err := pool.TokenFor(context.Background(), "a1")
+	if err != nil || got != "tok1" {
+		t.Fatalf("pre-invalidate: want tok1, got %q err=%v", got, err)
+	}
+
+	// After invalidation, the token struct should be cleared.
+	pool.InvalidateToken("a1")
+	for _, a := range pool.accounts {
+		a.mu.RLock()
+		tok := a.token
+		a.mu.RUnlock()
+		tok.mu.RLock()
+		empty := tok.accessToken == "" && tok.expiresAt.IsZero()
+		tok.mu.RUnlock()
+		if !empty {
+			t.Error("InvalidateToken should clear accessToken and expiresAt")
+		}
+	}
+
+	// Unknown account name → no-op.
+	pool.InvalidateToken("nonexistent")
+}
