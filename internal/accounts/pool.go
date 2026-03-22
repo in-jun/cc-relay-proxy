@@ -321,6 +321,17 @@ type AccountSnapshot struct {
 	TokenExpiry string
 }
 
+// SetRefreshCallback attaches cb to every account token so callers can log
+// token_refreshed events. The callback receives (accountName, expiresInMins).
+func (p *Pool) SetRefreshCallback(cb func(name string, expiresInMins int)) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, a := range p.accounts {
+		name := a.Name // capture for closure
+		a.token.SetRefreshCallback(func(mins int) { cb(name, mins) })
+	}
+}
+
 // ParseRateLimitHeaders extracts rate limit info from an HTTP response header.
 func ParseRateLimitHeaders(h http.Header) (RateLimit, bool) {
 	status := h.Get("anthropic-ratelimit-unified-status")

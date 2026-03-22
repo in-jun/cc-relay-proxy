@@ -22,18 +22,30 @@ const (
 	refreshMaxRetries  = 3
 )
 
+// RefreshCallback is called after a successful token refresh.
+// Used by the pool to emit token_refreshed log events.
+type RefreshCallback func(expiresInMins int)
+
 // Token holds an account's current OAuth credentials.
 type Token struct {
 	mu           sync.RWMutex
 	accessToken  string
 	refreshToken string
 	expiresAt    time.Time
+	onRefresh    RefreshCallback // optional; called after each successful refresh
 }
 
 // newToken creates a Token seeded with a refresh token only.
 // AccessToken is empty until the first Ensure call.
 func newToken(refreshToken string) *Token {
 	return &Token{refreshToken: refreshToken}
+}
+
+// SetRefreshCallback attaches a callback invoked after each successful token refresh.
+func (t *Token) SetRefreshCallback(cb RefreshCallback) {
+	t.mu.Lock()
+	t.onRefresh = cb
+	t.mu.Unlock()
 }
 
 // newTokenSeeded creates a Token pre-loaded with a known-valid access token.
@@ -140,6 +152,11 @@ func (t *Token) refresh(ctx context.Context) (string, error) {
 		t.refreshToken = result.RefreshToken
 	}
 	t.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
+
+	if t.onRefresh != nil {
+		t.onRefresh(result.ExpiresIn / 60)
+	}
+
 	return t.accessToken, nil
 }
 
