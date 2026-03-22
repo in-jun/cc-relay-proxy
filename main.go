@@ -31,9 +31,17 @@ func run() error {
 
 	tuneIntervalSec := 3600
 	if v := os.Getenv("CC_TUNE_INTERVAL"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			tuneIntervalSec = n
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("CC_TUNE_INTERVAL: must be a positive integer, got %q", v)
 		}
+		tuneIntervalSec = n
+	}
+
+	// Parse accounts from file first — fail fast before touching the log file
+	accts, err := accounts.ParseAccountsFile(accountsFile)
+	if err != nil {
+		return fmt.Errorf("accounts: %w", err)
 	}
 
 	// Initialize logger
@@ -42,12 +50,6 @@ func run() error {
 		return fmt.Errorf("logger: %w", err)
 	}
 	defer l.Close()
-
-	// Parse accounts from file
-	accts, err := accounts.ParseAccountsFile(accountsFile)
-	if err != nil {
-		return fmt.Errorf("accounts: %w", err)
-	}
 
 	pool := accounts.NewPool(accts)
 	params := pool.Params()
