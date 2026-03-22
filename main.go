@@ -61,6 +61,11 @@ func main() {
 		},
 	})
 
+	// Wire refresh callbacks so token refreshes appear in the log
+	pool.SetRefreshCallback(func(name string, expiresInMins int) {
+		l.Log("token_refreshed", name, map[string]any{"expiresInMins": expiresInMins})
+	})
+
 	log.Printf("[cc-relay-proxy] starting on :%s with %d account(s)", port, len(accts))
 
 	// Build components
