@@ -376,6 +376,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		HardBlock7d       float64 `json:"hardBlock7d"`
 		Weight5h          float64 `json:"weight5h"`
 		Weight7d          float64 `json:"weight7d"`
+		TuneInterval      string  `json:"tuneInterval"`
+		LastTuned         string  `json:"lastTuned"`
+	}
+
+	ti := s.pinger.TuneInterval()
+	tuneIntervalStr := "disabled"
+	if ti > 0 {
+		tuneIntervalStr = ti.String()
 	}
 
 	status := map[string]any{
@@ -389,6 +397,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			HardBlock7d:       params.HardBlock7d,
 			Weight5h:          params.Weight5h,
 			Weight7d:          params.Weight7d,
+			TuneInterval:      tuneIntervalStr,
+			LastTuned:         s.pinger.LastTuned(),
 		},
 		"accounts":    accts,
 		"tuneHistory": s.pinger.TuneHistory(),
