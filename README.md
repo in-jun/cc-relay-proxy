@@ -1,17 +1,17 @@
 # cc-relay-proxy
 
-Claude Code의 API 요청을 중간에서 가로채 여러 Anthropic 계정을 자동으로 돌려가며 사용하는 로컬 프록시. 429(Rate Limit)가 오면 다른 계정으로 즉시 전환해 Claude Code에는 보이지 않게 처리한다.
+A local proxy that sits between Claude Code and the Anthropic API, transparently rotating between multiple accounts to avoid rate limits. Claude Code never sees a 429 — the proxy absorbs it and retries with a different account.
 
 ```
 Claude Code  →  cc-relay-proxy :9999  →  api.anthropic.com
-                 ├─ 최적 계정 선택 (water-fill 알고리즘)
-                 ├─ 429 오면 다른 계정으로 자동 전환
-                 └─ GET /status  (계정 상태 확인)
+                 ├─ Route to best available account
+                 ├─ On 429 → switch account and retry
+                 └─ GET /status
 ```
 
-## 설치
+## Installation
 
-### Docker (권장)
+### Docker (recommended)
 
 ```bash
 docker run -d \
@@ -22,7 +22,7 @@ docker run -d \
   injundev/cc-relay-proxy
 ```
 
-### 직접 빌드
+### Build from source
 
 ```bash
 git clone https://github.com/in-jun/cc-relay-proxy
@@ -30,11 +30,11 @@ cd cc-relay-proxy
 go build -o cc-relay-proxy ./cmd/cc-relay-proxy
 ```
 
-Go 1.21 이상, 외부 의존성 없음.
+Requires Go 1.21+. No external dependencies.
 
-## 설정
+## Setup
 
-### 1. accounts.json 만들기
+### 1. Create accounts.json
 
 ```json
 [
@@ -43,7 +43,7 @@ Go 1.21 이상, 외부 의존성 없음.
 ]
 ```
 
-refresh token은 로컬 Claude Code 로그인 정보에서 가져온다:
+Get your refresh token from the local Claude Code credentials:
 
 ```bash
 cat ~/.claude/.credentials.json | python3 -c "
@@ -53,9 +53,9 @@ print(d['claudeAiOauth']['refreshToken'])
 "
 ```
 
-### 2. Claude Code 연결
+### 2. Connect Claude Code
 
-`~/.claude/settings.json`에 추가:
+Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -65,36 +65,36 @@ print(d['claudeAiOauth']['refreshToken'])
 }
 ```
 
-또는 별칭으로 쓰기:
+Or use an alias to keep the original `claude` command available:
 
 ```bash
 alias claudep='ANTHROPIC_BASE_URL=http://localhost:9999 claude'
 ```
 
-## 환경 변수
+## Configuration
 
-| 변수 | 기본값 | 설명 |
+| Variable | Default | Description |
 |---|---|---|
-| `CC_ACCOUNTS_FILE` | `accounts.json` | 계정 파일 경로 |
-| `CC_PROXY_PORT` | `9999` | 포트 |
-| `CC_PROXY_BIND` | `127.0.0.1` | 바인드 주소 |
-| `CC_LOG_PATH` | `logs/proxy.log` | 로그 파일 |
-| `CC_LOG_LEVEL` | — | `debug`로 설정하면 인증 헤더 로깅 |
+| `CC_ACCOUNTS_FILE` | `accounts.json` | Path to accounts file |
+| `CC_PROXY_PORT` | `9999` | Port to listen on |
+| `CC_PROXY_BIND` | `127.0.0.1` | Bind address (`0.0.0.0` to expose on LAN) |
+| `CC_LOG_PATH` | `logs/proxy.log` | JSONL log file |
+| `CC_LOG_LEVEL` | — | Set to `debug` to log auth headers |
 
-## 계정 선택 알고리즘
+## How account selection works
 
-각 계정에 water score(낮을수록 좋음)를 계산해 가장 여유 있는 계정을 선택한다:
+Each account gets a water score (lower = more available):
 
 ```
-water = max(5h_사용률 × 남은시간/300분,
-            7d_사용률 × 남은시간/168시간)
+water = max(5h_util × time_left / 300min,
+            7d_util × time_left / 168hr)
 ```
 
-time-decay가 핵심 — 5h 사용률이 90%여도 10분 후 리셋되면 score가 거의 0에 가까워져 자동으로 우선순위가 올라간다. 계정이 여럿일 때 현재 계정보다 10% 이상 score가 낮은 계정이 있으면 미리 전환한다.
+Time-decay is the key insight: an account at 90% 5h utilization that resets in 10 minutes scores near 0 and floats to the top of the pool — the proxy will start using it the moment quota resets. An account is only hard-blocked when the API explicitly returns `rejected`; high utilization alone just raises the score.
 
-API가 명시적으로 `rejected`를 반환할 때만 해당 계정을 제외하고, 나머지는 모두 score로만 판단한다.
+With multiple accounts, the proxy switches proactively if a better option scores at least 10% lower than the current one.
 
-## 상태 확인
+## Status endpoint
 
 ```bash
 curl -s http://localhost:9999/status | python3 -m json.tool
@@ -119,14 +119,14 @@ curl -s http://localhost:9999/status | python3 -m json.tool
 }
 ```
 
-## 로그
+## Logs
 
-`logs/proxy.log`에 JSONL 형식으로 기록된다. 주요 이벤트:
+Every significant event is written as a JSONL line to `logs/proxy.log`:
 
 ```
-request          — 각 요청의 계정, 레이턴시, water score
-account_switched — 계정 전환 (이유 포함)
-429_received     — 429 처리 결과 (switch / hold / forward)
-rate_limit_update — API 응답에서 파싱한 사용률
-token_refreshed  — OAuth 토큰 갱신
+request           — account, latency, water score per request
+account_switched  — switch reason and water scores before/after
+429_received      — action taken: switch / hold / forward
+rate_limit_update — utilization parsed from API response headers
+token_refreshed   — OAuth token renewal
 ```
