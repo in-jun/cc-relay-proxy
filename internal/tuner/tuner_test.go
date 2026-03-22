@@ -2,7 +2,9 @@ package tuner
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,6 +296,87 @@ func TestRunWithZeroIntervalDoesNotPanic(t *testing.T) {
 		// good
 	case <-time.After(time.Second):
 		t.Error("Run with interval=0 should return immediately, but it's still running after 1s")
+	}
+}
+
+// writeRawEvents writes JSONL events with explicit timestamps to a file,
+// bypassing the logger's time.Now() so we can control the ts values.
+func writeRawEvents(t *testing.T, path string, events []map[string]any) {
+	t.Helper()
+	var sb strings.Builder
+	for _, ev := range events {
+		line, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sb.Write(line)
+		sb.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnalyze7dTrendFires(t *testing.T) {
+	// Covers Rule 4: 7d growing steeply in the late half of the window.
+	// Also covers the lateAvg > 0.80 warning path.
+	// We write raw JSONL with explicit timestamps to control early/late split.
+	pool := makeTestPool()
+	f, _ := os.CreateTemp("", "tuner-7d-*.jsonl")
+	f.Close()
+	path := f.Name()
+	defer os.Remove(path)
+
+	now := time.Now()
+	windowStart := now.Add(-24 * time.Hour)
+	earlyTs := windowStart.Add(3 * time.Hour).UnixMilli()  // early half
+	lateTs := windowStart.Add(15 * time.Hour).UnixMilli()  // late half
+
+	var events []map[string]any
+
+	// 100 padding request events (all within window)
+	for i := 0; i < 100; i++ {
+		events = append(events, map[string]any{
+			"ts":    earlyTs + int64(i*1000),
+			"event": "request",
+			"data":  map[string]any{"method": "POST"},
+		})
+	}
+	// Early 7d data: low utilization
+	for i := 0; i < 10; i++ {
+		events = append(events, map[string]any{
+			"ts":      earlyTs,
+			"event":   "rate_limit_update",
+			"account": "a1",
+			"data":    map[string]any{"fiveHour": 0.30, "sevenDay": 0.10, "status": "allowed"},
+		})
+	}
+	// Late 7d data: high utilization → growthPer12h = 0.85 - 0.10 = 0.75 > 0.05
+	for i := 0; i < 10; i++ {
+		events = append(events, map[string]any{
+			"ts":      lateTs,
+			"event":   "rate_limit_update",
+			"account": "a1",
+			"data":    map[string]any{"fiveHour": 0.30, "sevenDay": 0.85, "status": "allowed"},
+		})
+	}
+
+	writeRawEvents(t, path, events)
+
+	l, err := logger.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	defer os.Remove(path + ".1")
+
+	oldParams := pool.Params()
+	tu := New(pool, l, time.Hour)
+	tu.analyze()
+
+	newParams := pool.Params()
+	if newParams.Weight7d <= oldParams.Weight7d {
+		t.Errorf("Rule 4: 7d trend should increase weight7d; old=%f new=%f", oldParams.Weight7d, newParams.Weight7d)
 	}
 }
 
