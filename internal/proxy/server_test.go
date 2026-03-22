@@ -795,6 +795,60 @@ func TestCheckAndPingResets(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
+func TestPingAccountPingError(t *testing.T) {
+	// pingAccount with a seeded (cached) token but a cancelled context:
+	//   - TokenFor succeeds immediately (cached access token, no network call)
+	//   - pingCtx derived from cancelled parent is already done
+	//   - DoUpstreamRequest fails → log error, return (lines 160-163 covered)
+	pool := newSeededTestPool(t) // tokens are pre-seeded, Ensure returns immediately
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, "http://127.0.0.1:1") // not reached
+	p := NewPinger(pool, l, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel so DoUpstreamRequest fails immediately
+
+	p.pingAccount(ctx, "a1") // logs "[pinger] ping error …" then returns
+}
+
+func TestRunTickerAndResetCases(t *testing.T) {
+	// Run's two ticker branches:
+	//   case <-ticker.C        → pingAccount (covers line 109)
+	//   case <-resetTicker.C  → checkAndPingResets (covers line 112)
+	// We set both intervals to 1ms so tickers fire almost immediately.
+	// pingAccount uses a cancelled ctx (seeded token) → DoUpstreamRequest fails quickly.
+	// checkAndPingResets finds no rejected accounts → returns immediately.
+	origPing := pingInterval
+	origReset := resetCheckInterval
+	pingInterval = 1 * time.Millisecond
+	resetCheckInterval = 1 * time.Millisecond
+	defer func() {
+		pingInterval = origPing
+		resetCheckInterval = origReset
+	}()
+
+	pool := newSeededTestPool(t)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, "http://127.0.0.1:1")
+	p := NewPinger(pool, l, srv)
+
+	// Cancel after 50ms — enough for both tickers to fire at least once.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		p.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run did not return after context cancellation")
+	}
+}
+
 func TestCheckAndPingResetsContinuePaths(t *testing.T) {
 	// Exercises the two early-continue paths in checkAndPingResets:
 	//   1. Status != "rejected"  → skip (first continue)
