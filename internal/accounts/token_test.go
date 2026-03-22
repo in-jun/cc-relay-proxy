@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,6 +60,56 @@ func TestTokenEnsureRefreshes(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("second Ensure should use cached token, got %d calls", calls)
+	}
+}
+
+func TestRefreshCallbackInvoked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "tok",
+			"expires_in":   7200, // 120 minutes
+		})
+	}))
+	defer srv.Close()
+
+	orig := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = orig }()
+
+	var cbMins int
+	tok := newToken("rt")
+	tok.SetRefreshCallback(func(mins int) { cbMins = mins })
+
+	_, err := tok.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if cbMins != 120 {
+		t.Errorf("callback should receive expiresIn/60 = 120, got %d", cbMins)
+	}
+}
+
+func TestIsPermError(t *testing.T) {
+	perm := []string{
+		"token refresh: status 400: {\"error\":\"invalid_grant\"}",
+		"token refresh: status 400: {\"error\":\"invalid_client\"}",
+		"token refresh: status 401: unauthorized",
+	}
+	for _, s := range perm {
+		if !isPermError(fmt.Errorf("%s", s)) {
+			t.Errorf("expected perm error for %q", s)
+		}
+	}
+	transient := []string{
+		"token refresh: http: connection refused",
+		"token refresh: status 429: rate limited",
+		"token refresh: status 500: internal error",
+	}
+	for _, s := range transient {
+		if isPermError(fmt.Errorf("%s", s)) {
+			t.Errorf("expected transient (non-perm) error for %q", s)
+		}
 	}
 }
 
