@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -657,5 +658,76 @@ func TestPingerLastTunedAfterTune(t *testing.T) {
 	result := srv.pinger.LastTuned()
 	if result == "never" {
 		t.Errorf("LastTuned should not be 'never' after tuner ran, got %q", result)
+	}
+}
+
+func TestSendRequestDebugModeLongToken(t *testing.T) {
+	// Token > 20 chars → tokPfx truncation path in sendRequest's debugMode branch.
+	old := debugMode
+	debugMode = true
+	defer func() { debugMode = old }()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	// Use a 30-char access token so len(tokPfx) > 20 triggers truncation.
+	longToken := "a_very_long_access_token_12345678"
+	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"` + longToken + `","expiresAt":9999999999999}]`)
+	pool := accounts.NewPool(accts)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200, got %d", w.Code)
+	}
+}
+
+func TestProxyLoopExhausted502(t *testing.T) {
+	// Pool with 1 account; upstream always returns 429 with rejected status
+	// and a reset 2s in the future. maxAttempts=3 (1+2). Each iteration holds
+	// for ~2s (the time.After(waitDur) case), continues, then exhausts the loop.
+	// Final result: 502 "all accounts exhausted".
+	//
+	// This test takes ~3-6 seconds and covers:
+	//   - case <-time.After(waitDur): continue  (hold timer fires)
+	//   - s.log.Log + http.Error on line 250-251  (loop exhaustion)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reset 2 seconds from now (Unix precision: minimum reliable non-zero waitDur)
+		resetSec := time.Now().Add(2 * time.Second).Unix()
+		w.Header().Set("anthropic-ratelimit-unified-status", "rejected")
+		w.Header().Set("anthropic-ratelimit-unified-5h-utilization", "1.0")
+		w.Header().Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(resetSec, 10))
+		w.Header().Set("anthropic-ratelimit-unified-7d-utilization", "0.95")
+		w.Header().Set("anthropic-ratelimit-unified-7d-reset", "9999999999")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	// 1 account → maxAttempts = 3 (1+2); all holds fire the timer, no context cancel.
+	accts, _ := accounts.ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999}]`)
+	pool := accounts.NewPool(accts)
+	// Pre-mark as rejected so SelectBest never switches.
+	pool.UpdateRateLimit("a1", accounts.RateLimit{
+		Status: "rejected", FiveHourUtil: 1.0,
+		FiveHourReset: time.Now().Add(2 * time.Second),
+	})
+
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req) // blocks for ~3×2s = ~6s
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("want 502 when loop exhausted after holds, got %d", w.Code)
 	}
 }
