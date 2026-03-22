@@ -243,6 +243,35 @@ func TestFormatAgoSimple(t *testing.T) {
 	}
 }
 
+func TestProxyReturns502WhenAllAccountsExhausted(t *testing.T) {
+	// Upstream always returns 429, no rate-limit headers — forces both
+	// accounts to "rejected" and exhausts the retry loop.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"rate_limit_error"}`))
+	}))
+	defer upstream.Close()
+
+	accts, _ := accounts.ParseAccounts(`[
+		{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999},
+		{"name":"a2","refreshToken":"rt2","accessToken":"tok2","expiresAt":9999999999999}
+	]`)
+	pool := accounts.NewPool(accts)
+	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
+
+	// With all accounts rejected and no rate-limit headers for a reset time,
+	// the proxy should either forward a 429 or return 502 — never hang silently.
+	if w.Code != http.StatusTooManyRequests && w.Code != http.StatusBadGateway {
+		t.Errorf("want 429 or 502 when all accounts exhausted, got %d", w.Code)
+	}
+}
+
 func TestStatusEndpointMethodNotAllowed(t *testing.T) {
 	pool := newTestPool()
 	l := newTestLogger(t)

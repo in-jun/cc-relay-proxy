@@ -244,6 +244,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Loop exhausted without sending a response — all accounts blocked and
+	// every attempt either failed or held. Return 502 to avoid silent closure.
+	s.log.Log("error", accountName, map[string]any{"code": "max_attempts_exhausted"})
+	http.Error(w, "proxy: all accounts exhausted", http.StatusBadGateway)
 }
 
 // sendRequest clones the incoming request, replaces Authorization, and sends to upstream.
