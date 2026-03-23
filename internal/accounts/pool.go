@@ -117,6 +117,39 @@ func (p *Pool) WatchRotations(path string) {
 	}
 }
 
+// MergeRotatedTokens reads a previously-persisted rotated accounts file and
+// updates in-memory token state for matching accounts. This lets a Docker
+// restart recover rotated refresh tokens written to a writable directory even
+// when the original accounts.json is mounted read-only.
+func (p *Pool) MergeRotatedTokens(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var cfgs []AccountConfig
+	if err := json.Unmarshal(data, &cfgs); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, cfg := range cfgs {
+		for _, a := range p.accounts {
+			if a.Name != cfg.Name {
+				continue
+			}
+			a.token.mu.Lock()
+			a.token.refreshToken = cfg.RefreshToken
+			if cfg.AccessToken != "" && cfg.ExpiresAt > 0 {
+				a.token.accessToken = cfg.AccessToken
+				a.token.expiresAt = time.UnixMilli(cfg.ExpiresAt)
+			}
+			a.token.mu.Unlock()
+			break
+		}
+	}
+	return nil
+}
+
 // ParseAccounts parses a JSON accounts array from a string.
 func ParseAccounts(data string) ([]*Account, error) {
 	var cfgs []AccountConfig
