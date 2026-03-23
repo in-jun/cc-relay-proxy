@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -44,12 +43,6 @@ func run() error {
 
 	pool := accounts.NewPool(accts)
 
-	// Writeback path: logs dir is always writable (accounts.json may be ro-mounted in Docker)
-	writebackPath := filepath.Join(filepath.Dir(logPath), "accounts-rotated.json")
-	if err := pool.MergeRotatedTokens(writebackPath); err == nil {
-		log.Printf("[cc-relay-proxy] merged rotated tokens from %s", writebackPath)
-	}
-
 	l.Log("startup", "", map[string]any{
 		"numAccounts":         len(accts),
 		"listenAddr":          bindAddr + ":" + port,
@@ -61,8 +54,8 @@ func run() error {
 		l.Log("token_refreshed", name, map[string]any{"expiresInMins": expiresInMins})
 	})
 
-	// Persist rotated tokens to the writable logs directory (accounts.json may be ro-mounted)
-	pool.WatchRotations(writebackPath)
+	// Persist rotated tokens back to accounts file so restarts don't lose them
+	pool.WatchRotations(accountsFile)
 
 	listenAddr := bindAddr + ":" + port
 	log.Printf("[cc-relay-proxy] starting on %s with %d account(s)", listenAddr, len(accts))

@@ -16,7 +16,7 @@ Claude Code  →  cc-relay-proxy :9999  →  api.anthropic.com
 ```bash
 docker run -d \
   -p 9999:9999 \
-  -v $(pwd)/accounts.json:/app/accounts.json:ro \
+  -v $(pwd)/accounts.json:/app/accounts.json \
   -v $(pwd)/logs:/app/logs \
   --name cc-relay-proxy \
   injundev/cc-relay-proxy
