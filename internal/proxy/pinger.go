@@ -17,8 +17,9 @@ const pingModel = "claude-haiku-4-5-20251001"
 // pingInterval and resetCheckInterval are vars so tests can set them to short
 // durations without waiting 10 minutes or 30 seconds.
 var (
-	pingInterval       = 10 * time.Minute
-	resetCheckInterval = 30 * time.Second
+	pingInterval            = 10 * time.Minute
+	resetCheckInterval      = 30 * time.Second
+	inactivePingInterval    = 20 * time.Minute
 )
 
 var pingBody []byte
@@ -70,9 +71,11 @@ func (p *Pinger) Run(ctx context.Context) {
 	ticker := time.NewTicker(pingInterval)
 	resetTicker := time.NewTicker(resetCheckInterval)
 	refreshTicker := time.NewTicker(tokenRefreshInterval)
+	inactiveTicker := time.NewTicker(inactivePingInterval)
 	defer ticker.Stop()
 	defer resetTicker.Stop()
 	defer refreshTicker.Stop()
+	defer inactiveTicker.Stop()
 
 	// Track which accounts we've already scheduled a reset-ping for
 	scheduledReset := map[string]time.Time{}
@@ -91,6 +94,9 @@ func (p *Pinger) Run(ctx context.Context) {
 			// Proactively refresh tokens for all accounts so blocked accounts
 			// don't have expired tokens when their rate limit window resets.
 			p.refreshAllTokens(ctx)
+		case <-inactiveTicker.C:
+			// Ping all non-active accounts to keep their rate limit state fresh.
+			p.pingInactiveAccounts(ctx)
 		}
 	}
 }
@@ -144,6 +150,19 @@ func (p *Pinger) refreshAllTokens(ctx context.Context) {
 				p.log.Log("error", name, map[string]any{"code": "proactive_refresh_failed", "msg": err.Error()})
 			}
 		}()
+	}
+}
+
+// pingInactiveAccounts pings all non-active accounts to keep their rate limit
+// state fresh. Without this, accounts that haven't been used since startup
+// carry stale utilization data, which leads to poor switching decisions.
+func (p *Pinger) pingInactiveAccounts(ctx context.Context) {
+	for _, snap := range p.pool.Accounts() {
+		if snap.IsActive {
+			continue
+		}
+		name := snap.Name
+		go p.pingAccount(ctx, name)
 	}
 }
 
