@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -65,9 +66,6 @@ func ParseAccountsFile(path string) ([]*Account, error) {
 
 // PersistAccounts writes the current token state of all accounts back to path
 // so that restarting the proxy doesn't lose rotated refresh tokens.
-// Note: we use os.WriteFile instead of temp-file+rename because when accounts.json
-// is a Docker bind-mounted file, creating new files in the same directory fails
-// (the directory is on the container overlay fs, not the host fs).
 func (p *Pool) PersistAccounts(path string) error {
 	p.mu.RLock()
 	cfgs := make([]AccountConfig, len(p.accounts))
@@ -90,7 +88,19 @@ func (p *Pool) PersistAccounts(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0600)
+	// Atomic write: temp file in same directory → rename.
+	// Requires the parent directory to be writable (use directory bind-mount, not file bind-mount).
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".cc-accounts-*.json")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	tmp.Close()
+	return os.Rename(tmp.Name(), path)
 }
 
 // WatchRotations registers a rotate callback on every account token so that

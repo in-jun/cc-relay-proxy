@@ -14,9 +14,11 @@ Claude Code  →  cc-relay-proxy :9999  →  api.anthropic.com
 ### Docker (recommended)
 
 ```bash
+mkdir -p config logs
+# put your accounts.json inside config/
 docker run -d \
   -p 9999:9999 \
-  -v $(pwd)/accounts.json:/app/accounts.json \
+  -v $(pwd)/config:/app/config \
   -v $(pwd)/logs:/app/logs \
   --name cc-relay-proxy \
   injundev/cc-relay-proxy
@@ -34,7 +36,11 @@ Requires Go 1.21+. No external dependencies.
 
 ## Setup
 
-### 1. Create accounts.json
+### 1. Create config/accounts.json
+
+```bash
+mkdir -p config
+```
 
 ```json
 [
@@ -75,7 +81,7 @@ alias claudep='ANTHROPIC_BASE_URL=http://localhost:9999 claude'
 
 | Variable | Default | Description |
 |---|---|---|
-| `CC_ACCOUNTS_FILE` | `accounts.json` | Path to accounts file |
+| `CC_ACCOUNTS_FILE` | `config/accounts.json` | Path to accounts file |
 | `CC_PROXY_PORT` | `9999` | Port to listen on |
 | `CC_PROXY_BIND` | `127.0.0.1` | Bind address (`0.0.0.0` to expose on LAN) |
 | `CC_LOG_PATH` | `logs/proxy.log` | JSONL log file |

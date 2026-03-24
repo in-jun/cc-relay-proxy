@@ -23,7 +23,7 @@ func main() {
 
 // run initialises and starts the proxy. It blocks until a signal or server error.
 func run() error {
-	accountsFile := envOrDefault("CC_ACCOUNTS_FILE", "accounts.json")
+	accountsFile := envOrDefault("CC_ACCOUNTS_FILE", "config/accounts.json")
 	port := envOrDefault("CC_PROXY_PORT", "9999")
 	bindAddr := envOrDefault("CC_PROXY_BIND", "127.0.0.1")
 	logPath := envOrDefault("CC_LOG_PATH", "logs/proxy.log")
