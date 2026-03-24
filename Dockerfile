@@ -24,7 +24,7 @@ EXPOSE 9999
 
 ENV CC_PROXY_PORT=9999 \
     CC_PROXY_BIND=0.0.0.0 \
-    CC_ACCOUNTS_FILE=/app/accounts.json \
+    CC_ACCOUNTS_FILE=/app/config/accounts.json \
     CC_LOG_PATH=/app/logs/proxy.log
 
 ENTRYPOINT ["cc-relay-proxy"]
