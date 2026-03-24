@@ -397,7 +397,9 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 	return cur.Name, cur.Name, false, ""
 }
 
-// SoonestReset returns the soonest reset time (5h or 7d) among all accounts.
+// SoonestReset returns the soonest reset time that would actually unblock an account.
+// The 5h reset is only meaningful if the 7d utilization is below 1.0; otherwise the
+// account remains rejected after the 5h window clears and waiting for it wastes the hold.
 func (p *Pool) SoonestReset() time.Time {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -406,11 +408,14 @@ func (p *Pool) SoonestReset() time.Time {
 		a.mu.RLock()
 		r5 := a.rateLimit.FiveHourReset
 		r7 := a.rateLimit.SevenDayReset
+		u7 := a.rateLimit.SevenDayUtil
 		a.mu.RUnlock()
-		for _, t := range []time.Time{r5, r7} {
-			if !t.IsZero() && (soonest.IsZero() || t.Before(soonest)) {
-				soonest = t
-			}
+		// Only count the 5h reset if 7d is not fully exhausted.
+		if u7 < 1.0 && !r5.IsZero() && (soonest.IsZero() || r5.Before(soonest)) {
+			soonest = r5
+		}
+		if !r7.IsZero() && (soonest.IsZero() || r7.Before(soonest)) {
+			soonest = r7
 		}
 	}
 	return soonest
