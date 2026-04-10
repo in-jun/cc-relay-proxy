@@ -115,22 +115,20 @@ func (p *Pinger) checkAndPingResets(ctx context.Context, scheduled map[string]ti
 			continue
 		}
 
-		// Find a reset time that has already passed.
+		// Check that a reset time has actually passed (account may be near recovery).
 		// Prefer the 5h window (shorter) so we recover sooner.
-		var reset time.Time
-		if !rl.FiveHourReset.IsZero() && !rl.FiveHourReset.After(now) {
-			reset = rl.FiveHourReset
-		} else if !rl.SevenDayReset.IsZero() && !rl.SevenDayReset.After(now) {
-			reset = rl.SevenDayReset
-		} else {
+		resetPassed := (!rl.FiveHourReset.IsZero() && !rl.FiveHourReset.After(now)) ||
+			(!rl.SevenDayReset.IsZero() && !rl.SevenDayReset.After(now))
+		if !resetPassed {
 			continue // reset hasn't arrived yet
 		}
 
-		// Avoid pinging more than once per reset cycle.
-		if last, ok := scheduled[snap.Name]; ok && last.Equal(reset) {
+		// Avoid pinging more than once per minute, but retry after that so a
+		// failed or still-rejected ping doesn't permanently block recovery detection.
+		if last, ok := scheduled[snap.Name]; ok && time.Since(last) < 60*time.Second {
 			continue
 		}
-		scheduled[snap.Name] = reset
+		scheduled[snap.Name] = now
 		log.Printf("[pinger] reset arrived for %s, pinging to confirm availability", snap.Name)
 		go p.pingAccount(ctx, snap.Name)
 	}
