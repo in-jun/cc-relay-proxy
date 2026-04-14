@@ -359,11 +359,12 @@ func EffectiveWater(water float64, priority int) float64 {
 //
 // Selection priority:
 //  1. Reactive switch — current account is rejected → switch to lowest
-//     effective-water non-rejected alternative.
+//     effective-water non-rejected alternative. If no alternative exists
+//     (all rejected), stay on current and return switched=false so the
+//     caller can forward the 429.
 //  2. Proactive switch — a non-rejected alternative has a lower effective
 //     water score than current → switch immediately.
-//  3. Keep current.
-//  4. All rejected → stay, caller forwards 429.
+//  3. Keep current (current is non-rejected and already best or tied).
 func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

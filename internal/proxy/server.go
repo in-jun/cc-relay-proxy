@@ -445,12 +445,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := map[string]any{
-		"active":               s.pool.ActiveName(),
-		"uptime":               formatDuration(uptime),
-		"totalRequests":        s.stats.TotalRequests.Load(),
-		"totalSwitches":        s.stats.TotalSwitches.Load(),
-		"total429":             s.stats.Total429.Load(),
-		"accounts": accts,
+		"active":        s.pool.ActiveName(),
+		"uptime":        formatDuration(uptime),
+		"totalRequests": s.stats.TotalRequests.Load(),
+		"totalSwitches": s.stats.TotalSwitches.Load(),
+		"total429":      s.stats.Total429.Load(),
+		"accounts":      accts,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

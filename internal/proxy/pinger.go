@@ -62,8 +62,9 @@ func (p *Pinger) StartupPing(ctx context.Context) {
 }
 
 // tokenRefreshInterval controls how often we proactively refresh tokens for
-// all accounts, even those currently blocked by rate limits. This prevents
-// idle accounts from having expired tokens when their rate limit window resets.
+// all non-active accounts, even those currently blocked by rate limits. This
+// prevents idle accounts from having expired tokens when their rate limit
+// window resets. The active account's token is refreshed on every request.
 var tokenRefreshInterval = 30 * time.Minute
 
 // Run starts the periodic ping loop and the reset-watcher.
