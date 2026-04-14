@@ -64,8 +64,13 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go srv.Pinger().StartupPing(ctx)
-	go srv.Pinger().Run(ctx)
+	// StartupPing must complete before Run begins so that the reset-watcher and
+	// inactive-ping ticker see fresh account state rather than the neutral startup
+	// values. Both run in one goroutine so the HTTP server is not blocked.
+	go func() {
+		srv.Pinger().StartupPing(ctx)
+		srv.Pinger().Run(ctx)
+	}()
 
 	httpSrv := &http.Server{
 		Addr:         listenAddr,
