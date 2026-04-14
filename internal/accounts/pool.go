@@ -47,12 +47,6 @@ type Account struct {
 	rateLimit RateLimit
 }
 
-// ProactiveHysteresis is the minimum fractional improvement in water score
-// required to switch away from the current account proactively. At 0.10, a
-// candidate must be at least 10% better to trigger a switch, preventing
-// flip-flopping between accounts with nearly equal scores.
-const ProactiveHysteresis = 0.10
-
 // Pool manages a set of Anthropic accounts and implements the selection algorithm.
 type Pool struct {
 	mu       sync.RWMutex

@@ -44,9 +44,8 @@ func run() error {
 	pool := accounts.NewPool(accts)
 
 	l.Log("startup", "", map[string]any{
-		"numAccounts":         len(accts),
-		"listenAddr":          bindAddr + ":" + port,
-		"proactiveHysteresis": accounts.ProactiveHysteresis,
+		"numAccounts": len(accts),
+		"listenAddr":  bindAddr + ":" + port,
 	})
 
 	// Wire refresh callbacks so token refreshes appear in the log

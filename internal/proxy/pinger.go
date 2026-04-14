@@ -160,17 +160,23 @@ func (p *Pinger) refreshAllTokens(ctx context.Context) {
 	}
 }
 
-// pingInactiveAccounts pings all non-active accounts to keep their rate limit
-// state fresh. Without this, accounts that haven't been used since startup
-// carry stale utilization data, which leads to poor switching decisions.
+// pingInactiveAccounts pings all non-active accounts in parallel and waits for
+// all pings to complete before returning. Callers that check SelectBest()
+// immediately after need fresh data, so the wait is intentional.
 func (p *Pinger) pingInactiveAccounts(ctx context.Context) {
+	var wg sync.WaitGroup
 	for _, snap := range p.pool.Accounts() {
 		if snap.IsActive {
 			continue
 		}
+		wg.Add(1)
 		name := snap.Name
-		go p.pingAccount(ctx, name)
+		go func() {
+			defer wg.Done()
+			p.pingAccount(ctx, name)
+		}()
 	}
+	wg.Wait()
 }
 
 // PingAfterSwitch pings the previous account (to measure recovery speed).

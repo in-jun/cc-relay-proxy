@@ -449,8 +449,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"totalRequests":        s.stats.TotalRequests.Load(),
 		"totalSwitches":        s.stats.TotalSwitches.Load(),
 		"total429":             s.stats.Total429.Load(),
-		"proactiveHysteresis":  accounts.ProactiveHysteresis,
-		"accounts":             accts,
+		"accounts": accts,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

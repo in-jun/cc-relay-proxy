@@ -567,8 +567,8 @@ func TestStatusEndpointWithLastSeen(t *testing.T) {
 	if !strings.Contains(body, "ago") && !strings.Contains(body, "just now") {
 		t.Errorf("expected lastSeen to contain ago/just now, got: %s", body)
 	}
-	if !strings.Contains(body, "proactiveHysteresis") {
-		t.Errorf("expected proactiveHysteresis in status body, got: %s", body)
+	if !strings.Contains(body, "priority") {
+		t.Errorf("expected priority in status body, got: %s", body)
 	}
 }
 
