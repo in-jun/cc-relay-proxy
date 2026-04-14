@@ -490,12 +490,15 @@ func (p *Pool) Accounts() []AccountSnapshot {
 		a.mu.RLock()
 		rl := a.rateLimit
 		a.mu.RUnlock()
+		ws := WaterScore(rl)
 		snaps[i] = AccountSnapshot{
-			Name:        a.Name,
-			IsActive:    i == activeIdx,
-			Priority:    effectivePriority(a.priority),
-			RateLimit:   rl,
-			TokenExpiry: a.token.ExpiresIn(),
+			Name:           a.Name,
+			IsActive:       i == activeIdx,
+			Priority:       effectivePriority(a.priority),
+			RateLimit:      rl,
+			TokenExpiry:    a.token.ExpiresIn(),
+			Water:          ws,
+			EffectiveWater: effectiveWater(ws, a.priority),
 		}
 	}
 	return snaps
@@ -503,11 +506,13 @@ func (p *Pool) Accounts() []AccountSnapshot {
 
 // AccountSnapshot is a point-in-time view of an account.
 type AccountSnapshot struct {
-	Name        string
-	IsActive    bool
-	Priority    int
-	RateLimit   RateLimit
-	TokenExpiry string
+	Name          string
+	IsActive      bool
+	Priority      int
+	RateLimit     RateLimit
+	TokenExpiry   string
+	Water         float64 // raw water score (no priority offset)
+	EffectiveWater float64 // water + priority band offset (used for selection)
 }
 
 // SetRefreshCallback attaches cb to every account token so callers can log
