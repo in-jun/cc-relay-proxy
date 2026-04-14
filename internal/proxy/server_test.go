@@ -359,11 +359,11 @@ func Test429WithNoRateLimitHeadersForcesRejected(t *testing.T) {
 	// When the upstream returns 429 with no rate-limit headers the proxy must
 	// mark the account as "rejected" so that SelectBest triggers a reactive
 	// switch on the next attempt.
-	callCount := 0
+	var callCount atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		n := callCount.Add(1)
 		auth := r.Header.Get("Authorization")
-		if strings.Contains(auth, "tok1") && callCount == 1 {
+		if strings.Contains(auth, "tok1") && n == 1 {
 			// First call: 429 with no rate-limit headers
 			w.WriteHeader(http.StatusTooManyRequests)
 			w.Write([]byte(`{"error":{"type":"rate_limit_error"}}`))
