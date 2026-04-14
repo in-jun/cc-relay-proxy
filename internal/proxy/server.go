@@ -69,12 +69,11 @@ type Stats struct {
 
 // Server is the reverse proxy HTTP server.
 type Server struct {
-	pool    *accounts.Pool
-	log     *logger.Logger
-	stats   Stats
-	target  *url.URL
-	pinger  *Pinger
-	bgCtx   context.Context // long-lived context for background work (pings etc.)
+	pool   *accounts.Pool
+	log    *logger.Logger
+	stats  Stats
+	target *url.URL
+	pinger *Pinger
 }
 
 // New creates a Server targeting the real Anthropic API.
@@ -90,7 +89,6 @@ func NewWithTarget(pool *accounts.Pool, l *logger.Logger, targetURL string) *Ser
 		pool:   pool,
 		log:    l,
 		target: target,
-		bgCtx:  context.Background(),
 	}
 	s.stats.StartTime = time.Now()
 	s.pinger = NewPinger(pool, l, s)
@@ -139,7 +137,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"fiveHour_before": prevRL.FiveHourUtil,
 		})
 		// Ping the previous account in background to measure its recovery speed
-		s.pinger.PingAfterSwitch(s.bgCtx, prevAccount)
+		s.pinger.PingAfterSwitch(prevAccount)
 	}
 
 	maxAttempts := s.pool.Len() + 2
@@ -202,7 +200,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 					"fiveHour": actualRL.FiveHourUtil,
 				})
 				// Ping previous account in background to measure recovery speed
-				s.pinger.PingAfterSwitch(s.bgCtx, prev429Account)
+				s.pinger.PingAfterSwitch(prev429Account)
 				accountName = nextName
 				continue
 			}

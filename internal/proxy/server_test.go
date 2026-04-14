@@ -273,7 +273,7 @@ func TestProxy429ForwardedWhenAllInCaution(t *testing.T) {
 	pool := accounts.NewPool(accts)
 
 	// Pre-seed both accounts as over threshold (allowed_warning) but not rejected.
-	// This makes Priority 3 (caution fallback) pick the current account (no switch).
+	// SelectBest keeps the current account (a1 has lower water) — no switch occurs.
 	pool.UpdateRateLimit("a1", accounts.RateLimit{Status: "allowed_warning", FiveHourUtil: 0.80})
 	pool.UpdateRateLimit("a2", accounts.RateLimit{Status: "allowed_warning", FiveHourUtil: 0.82})
 

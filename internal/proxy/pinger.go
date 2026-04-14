@@ -17,9 +17,9 @@ const pingModel = "claude-haiku-4-5-20251001"
 // pingInterval and resetCheckInterval are vars so tests can set them to short
 // durations without waiting 10 minutes or 30 seconds.
 var (
-	pingInterval            = 10 * time.Minute
-	resetCheckInterval      = 30 * time.Second
-	inactivePingInterval    = 5 * time.Minute
+	pingInterval         = 10 * time.Minute
+	resetCheckInterval   = 30 * time.Second
+	inactivePingInterval = 5 * time.Minute
 )
 
 var pingBody []byte
@@ -45,8 +45,8 @@ func NewPinger(pool *accounts.Pool, l *logger.Logger, server *Server) *Pinger {
 }
 
 // StartupPing pings all accounts once to establish baseline rate limit state.
-// It waits for all pings to complete, then emits a pool_snapshot event so the
-// tuner and log analysis tools have an accurate starting point.
+// It waits for all pings to complete, then emits a pool_snapshot event so that
+// log analysis has an accurate starting point.
 func (p *Pinger) StartupPing(ctx context.Context) {
 	snaps := p.pool.Accounts()
 	var wg sync.WaitGroup
@@ -182,8 +182,10 @@ func (p *Pinger) pingInactiveAccounts(ctx context.Context) {
 }
 
 // PingAfterSwitch pings the previous account (to measure recovery speed).
-func (p *Pinger) PingAfterSwitch(ctx context.Context, prevAccount string) {
-	go p.pingAccount(ctx, prevAccount)
+// Uses context.Background() because the ping must outlive the HTTP request context
+// that triggers the switch.
+func (p *Pinger) PingAfterSwitch(prevAccount string) {
+	go p.pingAccount(context.Background(), prevAccount)
 }
 
 // pingAccount sends a minimal request and records the result.
