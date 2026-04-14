@@ -380,18 +380,15 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 		return cur.Name, cur.Name, false, ""
 	}
 
-	// Priority 2: proactive switch — a significantly less-loaded account is available.
-	if bestIdx >= 0 && curWater > 0 {
-		threshold := curWater * (1 - ProactiveHysteresis)
-		if bestWater < threshold {
-			from := p.accounts[p.active].Name
-			p.active = bestIdx
-			to := p.accounts[p.active].Name
-			return to, from, true, fmt.Sprintf(
-				"proactive: %s water=%.3f → %s water=%.3f",
-				from, curWater, to, bestWater,
-			)
-		}
+	// Priority 2: proactive switch — always use the lowest-water account.
+	if bestIdx >= 0 && bestWater < curWater {
+		from := p.accounts[p.active].Name
+		p.active = bestIdx
+		to := p.accounts[p.active].Name
+		return to, from, true, fmt.Sprintf(
+			"proactive: %s water=%.3f → %s water=%.3f",
+			from, curWater, to, bestWater,
+		)
 	}
 
 	// Priority 3: keep current.

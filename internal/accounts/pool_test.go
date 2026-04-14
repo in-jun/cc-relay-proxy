@@ -62,13 +62,13 @@ func TestSelectBestReactiveSwitchOnRejected(t *testing.T) {
 
 func TestSelectBestHighUtilDoesNotBlock(t *testing.T) {
 	// High utilization alone no longer triggers a reactive switch — only
-	// "rejected" status does. A high-util account should stay current unless
-	// proactive hysteresis kicks in.
+	// "rejected" status does. Current account should stay when it already has
+	// the lowest water score.
 	p := makePool(2)
 	farFuture := time.Now().Add(200 * time.Hour)
-	// acct1 at 95% — both accounts have same water structure so no proactive switch
-	p.accounts[0].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: 0.95, FiveHourReset: farFuture}
-	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.94, FiveHourReset: farFuture}
+	// acct1 at 94%, acct2 at 95% — current (acct1) is already lowest water, no switch.
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed_warning", FiveHourUtil: 0.94, FiveHourReset: farFuture}
+	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.95, FiveHourReset: farFuture}
 
 	_, _, switched, _ := p.SelectBest()
 	if switched {
@@ -116,18 +116,17 @@ func TestSelectBestProactiveSwitches(t *testing.T) {
 	}
 }
 
-func TestSelectBestProactiveNoSwitchInsideHysteresis(t *testing.T) {
-	// acct2 water is only slightly better — within the 10% hysteresis band → no switch.
-	// acct1=0.70, acct2=0.65 → 0.65 > 0.70*(1-0.10)=0.63 → no switch
+func TestSelectBestProactiveNoSwitchWhenCurrentIsBest(t *testing.T) {
+	// Current account already has the lowest water — no switch.
 	p := makePool(3)
 	farFuture := time.Now().Add(200 * time.Hour)
-	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.70, FiveHourReset: farFuture}
+	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.40, FiveHourReset: farFuture}
 	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.65, FiveHourReset: farFuture}
 	p.accounts[2].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.68, FiveHourReset: farFuture}
 
 	_, _, switched, _ := p.SelectBest()
 	if switched {
-		t.Error("should not switch when alternative is within hysteresis band")
+		t.Error("should not switch when current account already has lowest water")
 	}
 }
 
