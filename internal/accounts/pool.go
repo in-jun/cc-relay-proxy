@@ -323,11 +323,6 @@ func WaterScore(rl RateLimit) float64 {
 	return s7d
 }
 
-// WaterScoreFor returns the current water-filling score for the named account.
-func (p *Pool) WaterScoreFor(name string) float64 {
-	return WaterScore(p.RateLimitFor(name))
-}
-
 // priorityBandSize is the water score offset applied per priority level.
 // Water scores are in [0,1], so a gap of 10 creates non-overlapping bands:
 //
