@@ -17,11 +17,15 @@ import (
 // AccountConfig is the per-account config read from the accounts JSON file.
 // accessToken and expiresAt are optional: if provided the proxy uses the
 // existing token immediately instead of forcing a refresh on first request.
+// Priority controls account preference (1=highest). Accounts with lower
+// priority numbers are always preferred over higher ones via a large water
+// score offset, forming absolute priority bands that never overlap.
 type AccountConfig struct {
 	Name         string `json:"name"`
 	RefreshToken string `json:"refreshToken"`
 	AccessToken  string `json:"accessToken,omitempty"` // optional seed
 	ExpiresAt    int64  `json:"expiresAt,omitempty"`   // unix ms, optional
+	Priority     int    `json:"priority,omitempty"`    // 1=highest (default 1)
 }
 
 // RateLimit holds the last-known rate limit state for an account.
@@ -37,6 +41,7 @@ type RateLimit struct {
 // Account is a single Anthropic account with its token and rate limit state.
 type Account struct {
 	Name      string
+	priority  int // 1=highest; 0 treated as 1
 	token     *Token
 	mu        sync.RWMutex
 	rateLimit RateLimit
@@ -80,6 +85,7 @@ func (p *Pool) PersistAccounts(path string) error {
 			RefreshToken: rt,
 			AccessToken:  at,
 			ExpiresAt:    exp.UnixMilli(),
+			Priority:     a.priority,
 		}
 	}
 	p.mu.RUnlock()
@@ -141,8 +147,13 @@ func ParseAccounts(data string) ([]*Account, error) {
 		} else {
 			tok = newToken(c.RefreshToken)
 		}
+		pri := c.Priority
+		if pri <= 0 {
+			pri = 1
+		}
 		accts[i] = &Account{
 			Name:      c.Name,
+			priority:  pri,
 			token:     tok,
 			rateLimit: RateLimit{Status: "allowed"},
 		}
@@ -325,16 +336,42 @@ func (p *Pool) WaterScoreFor(name string) float64 {
 	return WaterScore(p.RateLimitFor(name))
 }
 
-// SelectBest chooses the best account using a pure water-filling algorithm.
+// priorityBandSize is the water score offset applied per priority level.
+// Water scores are in [0,1], so a gap of 10 creates non-overlapping bands:
+//
+//	priority 1: effective water [0, 1]
+//	priority 2: effective water [10, 11]
+//	priority 3: effective water [20, 21]
+//
+// This makes lower-priority accounts always score worse than higher-priority
+// ones regardless of their actual utilization.
+const priorityBandSize = 10.0
+
+// effectivePriority normalises a raw priority, treating 0 as 1.
+func effectivePriority(p int) int {
+	if p <= 0 {
+		return 1
+	}
+	return p
+}
+
+// effectiveWater combines a raw water score with an account's priority to
+// produce a comparable score across priority bands. Lower = preferred.
+func effectiveWater(water float64, priority int) float64 {
+	return water + float64(effectivePriority(priority)-1)*priorityBandSize
+}
+
+// SelectBest chooses the best account using priority-weighted water-filling.
 // An account is only hard-blocked when the API explicitly rejects it (status
-// "rejected"). Utilization levels are handled by the water score — high
-// utilization raises the score, naturally routing requests to less-loaded
-// accounts without needing static thresholds.
+// "rejected"). Within the same priority band, lower water score wins. Across
+// bands, priority 1 always wins over priority 2, etc. — the gap between
+// bands (priorityBandSize=10) exceeds the entire water score range [0,1].
 //
 // Selection priority:
-//  1. Reactive switch — current account is rejected → switch to lowest water non-rejected.
-//  2. Proactive switch — a non-rejected alternative scores at least proactiveHysteresis
-//     fraction lower than current → switch to equalize load before hitting limits.
+//  1. Reactive switch — current account is rejected → switch to lowest
+//     effective-water non-rejected alternative.
+//  2. Proactive switch — a non-rejected alternative has a lower effective
+//     water score than current → switch immediately.
 //  3. Keep current.
 //  4. All rejected → stay, caller forwards 429.
 func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason string) {
@@ -348,21 +385,26 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 
 	curRejected := curRL.Status == "rejected"
 	curWater := WaterScore(curRL)
+	curEffective := effectiveWater(curWater, cur.priority)
 
-	// Find best non-rejected alternative by water-fill score.
+	// Find best non-rejected alternative by effective water score.
 	bestIdx := -1
-	bestWater := math.MaxFloat64
+	bestEffective := math.MaxFloat64
+	bestRawWater := math.MaxFloat64
 	for i, a := range p.accounts {
 		if i == p.active {
 			continue
 		}
 		a.mu.RLock()
 		rl := a.rateLimit
+		pri := a.priority
 		a.mu.RUnlock()
 		if rl.Status != "rejected" {
 			ws := WaterScore(rl)
-			if ws < bestWater {
-				bestWater = ws
+			ew := effectiveWater(ws, pri)
+			if ew < bestEffective {
+				bestEffective = ew
+				bestRawWater = ws
 				bestIdx = i
 			}
 		}
@@ -374,20 +416,23 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 			from := p.accounts[p.active].Name
 			p.active = bestIdx
 			to := p.accounts[p.active].Name
-			return to, from, true, fmt.Sprintf("reactive: %s rejected, switching to %s (water=%.3f)", from, to, bestWater)
+			return to, from, true, fmt.Sprintf(
+				"reactive: %s rejected, switching to %s (water=%.3f, priority=%d)",
+				from, to, bestRawWater, effectivePriority(p.accounts[p.active].priority),
+			)
 		}
 		// All rejected — stay, caller forwards 429.
 		return cur.Name, cur.Name, false, ""
 	}
 
-	// Priority 2: proactive switch — always use the lowest-water account.
-	if bestIdx >= 0 && bestWater < curWater {
+	// Priority 2: proactive switch — use lowest effective-water account.
+	if bestIdx >= 0 && bestEffective < curEffective {
 		from := p.accounts[p.active].Name
 		p.active = bestIdx
 		to := p.accounts[p.active].Name
 		return to, from, true, fmt.Sprintf(
-			"proactive: %s water=%.3f → %s water=%.3f",
-			from, curWater, to, bestWater,
+			"proactive: %s water=%.3f(eff=%.3f) → %s water=%.3f(eff=%.3f)",
+			from, curWater, curEffective, to, bestRawWater, bestEffective,
 		)
 	}
 
@@ -448,6 +493,7 @@ func (p *Pool) Accounts() []AccountSnapshot {
 		snaps[i] = AccountSnapshot{
 			Name:        a.Name,
 			IsActive:    i == activeIdx,
+			Priority:    effectivePriority(a.priority),
 			RateLimit:   rl,
 			TokenExpiry: a.token.ExpiresIn(),
 		}
@@ -459,6 +505,7 @@ func (p *Pool) Accounts() []AccountSnapshot {
 type AccountSnapshot struct {
 	Name        string
 	IsActive    bool
+	Priority    int
 	RateLimit   RateLimit
 	TokenExpiry string
 }

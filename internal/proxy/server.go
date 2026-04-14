@@ -402,6 +402,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	type acctStatus struct {
 		Name           string       `json:"name"`
 		IsActive       bool         `json:"isActive"`
+		Priority       int          `json:"priority"`
 		Status         string       `json:"status"`
 		Water          float64      `json:"water"`
 		FiveHour       fiveHourInfo `json:"fiveHour"`
@@ -422,6 +423,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		accts[i] = acctStatus{
 			Name:     a.Name,
 			IsActive: a.IsActive,
+			Priority: a.Priority,
 			Status:   rl.Status,
 			Water:    accounts.WaterScore(rl),
 			FiveHour: fiveHourInfo{
