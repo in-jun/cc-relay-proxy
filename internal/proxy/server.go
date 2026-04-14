@@ -201,7 +201,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				})
 				// Ping previous account in background to measure recovery speed
 				s.pinger.PingAfterSwitch(prev429Account)
-				accountName = nextName
 				continue
 			}
 

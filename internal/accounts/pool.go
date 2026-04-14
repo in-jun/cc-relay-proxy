@@ -481,7 +481,7 @@ func (p *Pool) Accounts() []AccountSnapshot {
 		snaps[i] = AccountSnapshot{
 			Name:        a.Name,
 			IsActive:    i == activeIdx,
-			Priority:    a.priority, // already normalized to >=1 at parse time
+			Priority:    effectivePriority(a.priority),
 			RateLimit:   rl,
 			TokenExpiry: a.token.ExpiresIn(),
 			Water:       WaterScore(rl),
