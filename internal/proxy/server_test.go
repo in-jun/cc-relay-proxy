@@ -354,32 +354,49 @@ func TestStatusEndpointMethodNotAllowed(t *testing.T) {
 	}
 }
 
-func Test429WithNoRateLimitHeadersMarkesRejected(t *testing.T) {
-	// Upstream returns 429 with no rate-limit headers
+func Test429WithNoRateLimitHeadersForcesRejected(t *testing.T) {
+	// When the upstream returns 429 with no rate-limit headers the proxy must
+	// mark the account as "rejected" so that SelectBest triggers a reactive
+	// switch on the next attempt.
+	callCount := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte(`{"error":{"type":"rate_limit_error"}}`))
+		callCount++
+		auth := r.Header.Get("Authorization")
+		if strings.Contains(auth, "tok1") && callCount == 1 {
+			// First call: 429 with no rate-limit headers
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"type":"rate_limit_error"}}`))
+			return
+		}
+		// Second call (tok2): success
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"msg_ok"}`))
 	}))
 	defer upstream.Close()
 
-	pool := newTestPool()
+	accts, _ := accounts.ParseAccounts(`[
+		{"name":"a1","refreshToken":"rt1","accessToken":"tok1","expiresAt":9999999999999},
+		{"name":"a2","refreshToken":"rt2","accessToken":"tok2","expiresAt":9999999999999}
+	]`)
+	pool := accounts.NewPool(accts)
 	l := newTestLogger(t)
+	srv := NewWithTarget(pool, l, upstream.URL)
 
-	// Manually set the target to our test upstream
-	srv := New(pool, l)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleProxy(w, req)
 
-	// Verify that after a 429, RateLimitFor returns "rejected"
-	// We simulate by calling UpdateRateLimit directly as the handler would
-	existing := pool.RateLimitFor("a1")
-	existing.Status = "rejected"
-	pool.UpdateRateLimit("a1", existing)
-
+	// After the headerless 429, a1 must have been marked rejected so the proxy
+	// switched to a2 and returned 200.
+	if w.Code != http.StatusOK {
+		t.Errorf("want 200 after switch triggered by headerless 429, got %d", w.Code)
+	}
 	rl := pool.RateLimitFor("a1")
 	if rl.Status != "rejected" {
-		t.Errorf("expected rejected after 429 without headers, got %s", rl.Status)
+		t.Errorf("a1 should be marked rejected after headerless 429, got %s", rl.Status)
 	}
-	_ = srv
-	_ = upstream
 }
 
 // errReader is an io.Reader that immediately returns an error.

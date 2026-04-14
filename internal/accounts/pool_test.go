@@ -130,7 +130,7 @@ func TestSelectBestProactiveNoSwitchWhenCurrentIsBest(t *testing.T) {
 }
 
 func TestSelectBestProactiveSkippedWhenCurrentWaterZero(t *testing.T) {
-	// curWater=0 → proactive branch skipped (division guard).
+	// curWater=0 and bestEffective=0 → bestEffective < curEffective is false → no switch.
 	p := makePool(2)
 	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0, SevenDayUtil: 0}
 	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0, SevenDayUtil: 0}
