@@ -69,11 +69,13 @@ func (p *Pool) PersistAccounts(path string) error {
 	p.mu.RLock()
 	cfgs := make([]AccountConfig, len(p.accounts))
 	for i, a := range p.accounts {
-		a.mu.RLock()
+		// Token fields are protected by token.mu, not a.mu.
+		// Account.Name and a.priority are write-once at parse time: safe to read without a lock.
+		a.token.mu.RLock()
 		rt := a.token.refreshToken
 		at := a.token.accessToken
 		exp := a.token.expiresAt
-		a.mu.RUnlock()
+		a.token.mu.RUnlock()
 		cfgs[i] = AccountConfig{
 			Name:         a.Name,
 			RefreshToken: rt,

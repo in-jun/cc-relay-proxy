@@ -23,7 +23,12 @@ const (
 )
 
 // tokenEndpoint is the URL used by refresh(). Overridable in tests.
-var tokenEndpoint = TokenURL
+// tokenEndpointMu guards concurrent access; both SetTokenEndpoint and
+// refresh() run in different goroutines during parallel tests.
+var (
+	tokenEndpoint   = TokenURL
+	tokenEndpointMu sync.RWMutex
+)
 
 // refreshHTTPClient is a dedicated client for OAuth token refresh calls.
 // Using a separate client (rather than http.DefaultClient) keeps connections
@@ -41,8 +46,10 @@ var refreshHTTPClient = &http.Client{
 // SetTokenEndpoint overrides the OAuth token endpoint. Returns the previous value.
 // For use in tests only.
 func SetTokenEndpoint(url string) string {
+	tokenEndpointMu.Lock()
 	prev := tokenEndpoint
 	tokenEndpoint = url
+	tokenEndpointMu.Unlock()
 	return prev
 }
 
@@ -148,10 +155,14 @@ func (t *Token) refresh(ctx context.Context) (string, error) {
 		"scope":         Scopes,
 	})
 
+	tokenEndpointMu.RLock()
+	endpoint := tokenEndpoint
+	tokenEndpointMu.RUnlock()
+
 	rctx, cancel := context.WithTimeout(ctx, refreshTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(rctx, http.MethodPost, tokenEndpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("token refresh: build request: %w", err)
 	}

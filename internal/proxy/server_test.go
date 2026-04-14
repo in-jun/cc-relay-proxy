@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -136,9 +137,9 @@ func TestProxyForwardsToUpstream(t *testing.T) {
 
 func TestProxySwitchesOn429(t *testing.T) {
 	// First request: upstream returns 429 for acct1 token, then 200 for acct2 token
-	calls := 0
+	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		calls.Add(1)
 		auth := r.Header.Get("Authorization")
 		if strings.Contains(auth, "token_a1") {
 			// acct1 gets 429
@@ -169,8 +170,8 @@ func TestProxySwitchesOn429(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("want 200 after switch, got %d", w.Code)
 	}
-	if calls < 2 {
-		t.Errorf("want at least 2 upstream calls (one 429, one success), got %d", calls)
+	if calls.Load() < 2 {
+		t.Errorf("want at least 2 upstream calls (one 429, one success), got %d", calls.Load())
 	}
 }
 
