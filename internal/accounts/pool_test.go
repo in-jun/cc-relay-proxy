@@ -660,9 +660,8 @@ func TestSetRefreshCallbackInvoked(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	orig := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = orig }()
+	orig := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(orig)
 
 	p := makePool(2)
 

@@ -31,9 +31,8 @@ func TestTokenEnsureRefreshes(t *testing.T) {
 	defer srv.Close()
 
 	// Point the token refresher at our fake server
-	orig := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = orig }()
+	orig := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(orig)
 
 	tok := newToken("rt_initial")
 	ctx := context.Background()
@@ -74,9 +73,8 @@ func TestRefreshCallbackInvoked(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	orig := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = orig }()
+	orig := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(orig)
 
 	var cbMins int
 	tok := newToken("rt")
@@ -125,9 +123,8 @@ func TestEnsurePermErrorNoRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	orig := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = orig }()
+	orig := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(orig)
 
 	tok := newToken("expired_rt")
 	_, err := tok.Ensure(context.Background())
@@ -160,9 +157,8 @@ func TestEnsureTransientErrorRetries(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	orig := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = orig }()
+	orig := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(orig)
 
 	tok := newToken("rt")
 	got, err := tok.Ensure(context.Background())
@@ -232,9 +228,8 @@ func TestEnsureContextCancelledDuringRetryWait(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	orig := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = orig }()
+	orig := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(orig)
 
 	tok := newToken("rt")
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -254,9 +249,8 @@ func TestRefreshBadJSONResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	orig := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = orig }()
+	orig := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(orig)
 
 	tok := newToken("rt")
 	_, err := tok.Ensure(context.Background())
@@ -276,9 +270,8 @@ func TestRefreshEmptyAccessToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	orig := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = orig }()
+	orig := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(orig)
 
 	tok := newToken("rt")
 	_, err := tok.Ensure(context.Background())
@@ -368,9 +361,8 @@ func TestRefreshHTTPClientError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	prev := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = prev }()
+	prev := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(prev)
 
 	// Use a short context so we don't wait through the full retry delay.
 	// The http error is recorded on attempt 0; ctx expires before attempt 1.
@@ -400,9 +392,8 @@ func TestRefreshBodyReadError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	prev := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = prev }()
+	prev := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(prev)
 
 	// Use a short context so we don't wait through the full retry delay.
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -436,9 +427,8 @@ func TestEnsureDoubleCheckOnWriteLock(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	orig := tokenEndpoint
-	tokenEndpoint = srv.URL
-	defer func() { tokenEndpoint = orig }()
+	orig := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(orig)
 
 	tok := newToken("rt") // starts with no access token → both goroutines fail fast path
 
