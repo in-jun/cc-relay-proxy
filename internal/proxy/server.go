@@ -354,10 +354,11 @@ func (s *Server) sendRequest(r *http.Request, bodyBuf []byte, tok string) (*http
 	return resp, nil, nil
 }
 
-// DoUpstreamRequest sends a request to the Anthropic API with the given token.
-// Used by the pinger.
+// DoUpstreamRequest sends a request to the upstream target with the given token.
+// Used by the pinger. Uses s.target so tests with fake upstreams work correctly.
 func (s *Server) DoUpstreamRequest(ctx context.Context, tok, path string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, AnthropicTarget+path, bytes.NewReader(body))
+	targetURL := s.target.String() + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

@@ -889,35 +889,21 @@ func TestProxySwitchedOnInitialSelect(t *testing.T) {
 	}
 }
 
-// roundTripFunc is a test helper implementing http.RoundTripper.
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
 func TestPingAccountSuccess(t *testing.T) {
-	// pingAccount with seeded token + mock HTTP client that returns rate-limit headers.
-	// Covers lines 165-176 (successful ping path including UpdateRateLimit and log).
+	// pingAccount with seeded token + fake upstream that returns rate-limit headers.
+	// Covers the successful ping path including UpdateRateLimit and log.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("anthropic-ratelimit-unified-status", "allowed")
+		w.Header().Set("anthropic-ratelimit-unified-5h-utilization", "0.23")
+		w.Header().Set("anthropic-ratelimit-unified-7d-utilization", "0.07")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
 	pool := newSeededTestPool(t)
 	l := newTestLogger(t)
-	srv := NewWithTarget(pool, l, AnthropicTarget)
+	srv := NewWithTarget(pool, l, upstream.URL)
 	p := NewPinger(pool, l, srv)
-
-	// Replace http.DefaultClient with a mock that returns a 200 with rate-limit headers.
-	origClient := http.DefaultClient
-	http.DefaultClient = &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			header := http.Header{}
-			header.Set("anthropic-ratelimit-unified-status", "allowed")
-			header.Set("anthropic-ratelimit-unified-5h-utilization", "0.23")
-			header.Set("anthropic-ratelimit-unified-7d-utilization", "0.07")
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     header,
-				Body:       http.NoBody,
-			}, nil
-		}),
-	}
-	defer func() { http.DefaultClient = origClient }()
 
 	p.pingAccount(context.Background(), "a1")
 	// Verify rate limit was recorded (UpdateRateLimit stores LastSeen).

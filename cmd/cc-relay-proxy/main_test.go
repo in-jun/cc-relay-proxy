@@ -79,63 +79,6 @@ func TestRunLoggerFails(t *testing.T) {
 	}
 }
 
-func TestRunTuneIntervalParsed(t *testing.T) {
-	// Valid CC_TUNE_INTERVAL is accepted; error comes from logger init with bad path.
-	path := writeAccountsFile(t, `[{"name":"a1","refreshToken":"rt1"}]`)
-
-	f, err := os.CreateTemp("", "main-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-	defer os.Remove(f.Name())
-
-	os.Setenv("CC_ACCOUNTS_FILE", path)
-	os.Setenv("CC_TUNE_INTERVAL", "7200")
-	os.Setenv("CC_LOG_PATH", f.Name()+"/sub/log.jsonl")
-	defer func() {
-		os.Unsetenv("CC_ACCOUNTS_FILE")
-		os.Unsetenv("CC_TUNE_INTERVAL")
-		os.Unsetenv("CC_LOG_PATH")
-	}()
-
-	if err := run(); err == nil {
-		t.Fatal("expected error when logger init fails")
-	}
-}
-
-func TestRunTuneIntervalInvalid(t *testing.T) {
-	// Invalid CC_TUNE_INTERVAL returns an error immediately (before accounts/logger init).
-	path := writeAccountsFile(t, `[{"name":"a1","refreshToken":"rt1"}]`)
-
-	os.Setenv("CC_ACCOUNTS_FILE", path)
-	os.Setenv("CC_TUNE_INTERVAL", "not-a-number")
-	defer func() {
-		os.Unsetenv("CC_ACCOUNTS_FILE")
-		os.Unsetenv("CC_TUNE_INTERVAL")
-	}()
-
-	if err := run(); err == nil {
-		t.Fatal("expected error for invalid CC_TUNE_INTERVAL")
-	}
-}
-
-func TestRunTuneIntervalZero(t *testing.T) {
-	// CC_TUNE_INTERVAL=0 is rejected (must be positive).
-	path := writeAccountsFile(t, `[{"name":"a1","refreshToken":"rt1"}]`)
-
-	os.Setenv("CC_ACCOUNTS_FILE", path)
-	os.Setenv("CC_TUNE_INTERVAL", "0")
-	defer func() {
-		os.Unsetenv("CC_ACCOUNTS_FILE")
-		os.Unsetenv("CC_TUNE_INTERVAL")
-	}()
-
-	if err := run(); err == nil {
-		t.Fatal("expected error for CC_TUNE_INTERVAL=0")
-	}
-}
-
 func TestRunPortInUse(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

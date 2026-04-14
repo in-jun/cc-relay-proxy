@@ -93,8 +93,7 @@ func TestSelectBestAllRejected(t *testing.T) {
 }
 
 func TestSelectBestProactiveSwitches(t *testing.T) {
-	// proactiveHysteresis = 0.10.
-	// acct1 water=0.70, acct2 water=0.40 → 0.40 < 0.70*(1-0.10)=0.63 → proactive switch.
+	// acct1 water=0.70, acct2 water=0.40 → bestEffective(0.40) < curEffective(0.70) → proactive switch.
 	p := makePool(3)
 	farFuture := time.Now().Add(200 * time.Hour)
 	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0.70, FiveHourReset: farFuture}

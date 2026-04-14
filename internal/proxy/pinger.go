@@ -99,6 +99,7 @@ func (p *Pinger) Run(ctx context.Context) {
 			// then check if a proactive switch is warranted.
 			p.pingInactiveAccounts(ctx)
 			if name, prev, switched, reason := p.pool.SelectBest(); switched {
+				p.server.stats.TotalSwitches.Add(1)
 				p.log.Log("account_switched", name, map[string]any{
 					"from":   prev,
 					"to":     name,
