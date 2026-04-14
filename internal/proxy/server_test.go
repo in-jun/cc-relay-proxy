@@ -633,9 +633,9 @@ func TestStartupPing(t *testing.T) {
 	srv := NewWithTarget(pool, l, AnthropicTarget)
 	p := NewPinger(pool, l, srv)
 
+	// StartupPing blocks until all per-account goroutines finish (via wg.Wait()),
+	// so no sleep is needed after it returns.
 	p.StartupPing(context.Background())
-	// Give the goroutine time to complete the token refresh attempt.
-	time.Sleep(50 * time.Millisecond)
 }
 
 func TestRunContextCancelled(t *testing.T) {

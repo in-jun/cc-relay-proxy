@@ -222,7 +222,7 @@ func (p *Pinger) pingAccount(ctx context.Context, name string) {
 }
 
 // emitPoolSnapshot logs a point-in-time view of all accounts' utilization and
-// water scores. Used by the 12h analysis loop to understand pool state over time.
+// water scores. Used for offline log analysis to understand pool state over time.
 func (p *Pinger) emitPoolSnapshot(trigger string) {
 	snaps := p.pool.Accounts()
 	accts := make([]map[string]any, len(snaps))
