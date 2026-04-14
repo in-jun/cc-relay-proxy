@@ -406,7 +406,7 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 			to := p.accounts[p.active].Name
 			return to, from, true, fmt.Sprintf(
 				"reactive: %s rejected, switching to %s (water=%.3f, priority=%d)",
-				from, to, bestRawWater, effectivePriority(p.accounts[p.active].priority),
+				from, to, bestRawWater, p.accounts[p.active].priority,
 			)
 		}
 		// All rejected — stay, caller forwards 429.
