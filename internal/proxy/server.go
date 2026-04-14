@@ -145,13 +145,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	maxAttempts := s.pool.Len() + 2
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		tok, name, err := s.pool.ActiveTokenWithName(r.Context())
+		accountName = name
 		if err != nil {
 			log.Printf("[proxy] token error: %v", err)
 			s.log.Log("error", accountName, map[string]any{"code": "token_error", "msg": err.Error()})
 			http.Error(w, "proxy: token unavailable", http.StatusBadGateway)
 			return
 		}
-		accountName = name
 
 		resp, rawBody, err := s.sendRequest(r, bodyBuf, tok)
 		if err != nil {
