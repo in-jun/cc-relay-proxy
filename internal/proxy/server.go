@@ -426,7 +426,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			IsActive: a.IsActive,
 			Priority: a.Priority,
 			Status:   rl.Status,
-			Water:    a.EffectiveWater,
+			Water:    accounts.EffectiveWater(a.Water, a.Priority),
 			RawWater: a.Water,
 			FiveHour: fiveHourInfo{
 				Utilization:  rl.FiveHourUtil,

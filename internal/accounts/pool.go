@@ -147,13 +147,9 @@ func ParseAccounts(data string) ([]*Account, error) {
 		} else {
 			tok = newToken(c.RefreshToken)
 		}
-		pri := c.Priority
-		if pri <= 0 {
-			pri = 1
-		}
 		accts[i] = &Account{
 			Name:      c.Name,
-			priority:  pri,
+			priority:  effectivePriority(c.Priority),
 			token:     tok,
 			rateLimit: RateLimit{Status: "allowed"},
 		}
@@ -355,9 +351,9 @@ func effectivePriority(p int) int {
 	return p
 }
 
-// effectiveWater combines a raw water score with an account's priority to
+// EffectiveWater combines a raw water score with an account's priority to
 // produce a comparable score across priority bands. Lower = preferred.
-func effectiveWater(water float64, priority int) float64 {
+func EffectiveWater(water float64, priority int) float64 {
 	return water + float64(effectivePriority(priority)-1)*priorityBandSize
 }
 
@@ -385,7 +381,7 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 
 	curRejected := curRL.Status == "rejected"
 	curWater := WaterScore(curRL)
-	curEffective := effectiveWater(curWater, cur.priority)
+	curEffective := EffectiveWater(curWater, cur.priority)
 
 	// Find best non-rejected alternative by effective water score.
 	bestIdx := -1
@@ -401,7 +397,7 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 		a.mu.RUnlock()
 		if rl.Status != "rejected" {
 			ws := WaterScore(rl)
-			ew := effectiveWater(ws, pri)
+			ew := EffectiveWater(ws, pri)
 			if ew < bestEffective {
 				bestEffective = ew
 				bestRawWater = ws
@@ -490,15 +486,13 @@ func (p *Pool) Accounts() []AccountSnapshot {
 		a.mu.RLock()
 		rl := a.rateLimit
 		a.mu.RUnlock()
-		ws := WaterScore(rl)
 		snaps[i] = AccountSnapshot{
-			Name:           a.Name,
-			IsActive:       i == activeIdx,
-			Priority:       effectivePriority(a.priority),
-			RateLimit:      rl,
-			TokenExpiry:    a.token.ExpiresIn(),
-			Water:          ws,
-			EffectiveWater: effectiveWater(ws, a.priority),
+			Name:        a.Name,
+			IsActive:    i == activeIdx,
+			Priority:    a.priority, // already normalized to >=1 at parse time
+			RateLimit:   rl,
+			TokenExpiry: a.token.ExpiresIn(),
+			Water:       WaterScore(rl),
 		}
 	}
 	return snaps
@@ -506,13 +500,12 @@ func (p *Pool) Accounts() []AccountSnapshot {
 
 // AccountSnapshot is a point-in-time view of an account.
 type AccountSnapshot struct {
-	Name          string
-	IsActive      bool
-	Priority      int
-	RateLimit     RateLimit
-	TokenExpiry   string
-	Water         float64 // raw water score (no priority offset)
-	EffectiveWater float64 // water + priority band offset (used for selection)
+	Name        string
+	IsActive    bool
+	Priority    int
+	RateLimit   RateLimit
+	TokenExpiry string
+	Water       float64 // raw water score; EffectiveWater = Water + (Priority-1)*priorityBandSize
 }
 
 // SetRefreshCallback attaches cb to every account token so callers can log
