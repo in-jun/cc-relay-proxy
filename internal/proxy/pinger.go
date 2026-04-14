@@ -19,7 +19,7 @@ const pingModel = "claude-haiku-4-5-20251001"
 var (
 	pingInterval            = 10 * time.Minute
 	resetCheckInterval      = 30 * time.Second
-	inactivePingInterval    = 20 * time.Minute
+	inactivePingInterval    = 5 * time.Minute
 )
 
 var pingBody []byte
