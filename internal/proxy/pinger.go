@@ -95,8 +95,17 @@ func (p *Pinger) Run(ctx context.Context) {
 			// don't have expired tokens when their rate limit window resets.
 			p.refreshAllTokens(ctx)
 		case <-inactiveTicker.C:
-			// Ping all non-active accounts to keep their rate limit state fresh.
+			// Ping all non-active accounts to keep their rate limit state fresh,
+			// then check if a proactive switch is warranted.
 			p.pingInactiveAccounts(ctx)
+			if name, prev, switched, reason := p.pool.SelectBest(); switched {
+				p.log.Log("account_switched", name, map[string]any{
+					"from":   prev,
+					"to":     name,
+					"reason": reason,
+				})
+				go p.pingAccount(ctx, prev)
+			}
 		}
 	}
 }
