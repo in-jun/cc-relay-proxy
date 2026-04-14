@@ -88,7 +88,7 @@ func (l *Logger) Close() error {
 }
 
 // ReadLines returns all log entries (from current + rotated file) as raw JSON objects.
-// Entries are sorted oldest-first. Used by the auto-tuner.
+// Entries are in write order (oldest-first) across both files.
 //
 // The mutex is held only long enough to read raw bytes from disk; JSON parsing
 // happens outside the lock so log writes are not blocked during CPU-bound parsing.

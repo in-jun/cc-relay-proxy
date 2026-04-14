@@ -388,14 +388,21 @@ func TestTokenForUnknown(t *testing.T) {
 }
 
 func TestSetRefreshCallback(t *testing.T) {
+	// Verify SetRefreshCallback attaches the callback on every account token
+	// so the internal onRefresh field is non-nil after the call.
 	p := makePool(2)
-	called := false
-	p.SetRefreshCallback(func(name string, expiresInMins int) {
-		called = true
-		_ = name
-		_ = expiresInMins
-	})
-	_ = called
+	p.SetRefreshCallback(func(name string, expiresInMins int) {})
+	for _, a := range p.accounts {
+		a.mu.RLock()
+		tok := a.token
+		a.mu.RUnlock()
+		tok.mu.RLock()
+		cb := tok.onRefresh
+		tok.mu.RUnlock()
+		if cb == nil {
+			t.Errorf("account %s: SetRefreshCallback did not set onRefresh", a.Name)
+		}
+	}
 }
 
 func TestParseRateLimitHeadersMissingStatus(t *testing.T) {
