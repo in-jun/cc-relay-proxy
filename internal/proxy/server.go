@@ -147,6 +147,17 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("[proxy] token error: %v", err)
 			s.log.Log("error", accountName, map[string]any{"code": "token_error", "msg": err.Error()})
+			// Permanent token error: refresh token is dead. Mark rejected so
+			// SelectBest switches away, then retry within the attempt loop.
+			if accounts.IsPermTokenError(err) {
+				existing := s.pool.RateLimitFor(accountName)
+				existing.Status = "rejected"
+				s.pool.UpdateRateLimit(accountName, existing)
+				if _, _, switched, _ := s.pool.SelectBest(); switched {
+					s.stats.TotalSwitches.Add(1)
+				}
+				continue
+			}
 			http.Error(w, "proxy: token unavailable", http.StatusBadGateway)
 			return
 		}

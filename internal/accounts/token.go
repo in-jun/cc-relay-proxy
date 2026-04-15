@@ -220,6 +220,11 @@ func isPermError(err error) bool {
 		strings.Contains(s, "status 401")
 }
 
+// IsPermTokenError reports whether a token refresh error is permanent (the
+// refresh token is invalid and cannot be recovered). Callers should mark the
+// account as rejected so the pool stops routing traffic to it.
+func IsPermTokenError(err error) bool { return isPermError(err) }
+
 // Invalidate clears the cached access token, forcing the next Ensure call
 // to perform a fresh token refresh. Called when the API returns 401.
 func (t *Token) Invalidate() {

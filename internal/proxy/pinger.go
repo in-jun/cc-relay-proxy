@@ -45,8 +45,8 @@ func NewPinger(pool *accounts.Pool, l *logger.Logger, server *Server) *Pinger {
 }
 
 // StartupPing pings all accounts once to establish baseline rate limit state.
-// It waits for all pings to complete, then emits a pool_snapshot event so that
-// log analysis has an accurate starting point.
+// After all pings complete it calls SelectBest so the initial active account
+// is chosen by priority and water score rather than by JSON array order.
 func (p *Pinger) StartupPing(ctx context.Context) {
 	snaps := p.pool.Accounts()
 	var wg sync.WaitGroup
@@ -58,6 +58,17 @@ func (p *Pinger) StartupPing(ctx context.Context) {
 		}(snap.Name)
 	}
 	wg.Wait()
+
+	// Pick the best initial active account based on fresh ping data.
+	if name, prev, switched, reason := p.pool.SelectBest(); switched {
+		p.log.Log("account_switched", name, map[string]any{
+			"from":   prev,
+			"to":     name,
+			"reason": "startup: " + reason,
+		})
+		log.Printf("[pinger] startup: switched active from %s to %s (%s)", prev, name, reason)
+	}
+
 	p.emitPoolSnapshot("startup")
 }
 
@@ -196,6 +207,15 @@ func (p *Pinger) pingAccount(ctx context.Context, name string) {
 	if err != nil {
 		log.Printf("[pinger] token error for %s: %v", name, err)
 		p.log.Log("error", name, map[string]any{"code": "ping_token_error", "msg": err.Error()})
+		// Permanent errors (invalid_grant, invalid_client, 401) mean the refresh
+		// token is dead. Mark the account rejected so SelectBest stops routing
+		// traffic to it.
+		if accounts.IsPermTokenError(err) {
+			existing := p.pool.RateLimitFor(name)
+			existing.Status = "rejected"
+			p.pool.UpdateRateLimit(name, existing)
+			log.Printf("[pinger] marked %s as rejected (permanent token error)", name)
+		}
 		return
 	}
 
