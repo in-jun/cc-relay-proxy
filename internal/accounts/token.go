@@ -115,12 +115,15 @@ func (t *Token) Ensure(ctx context.Context) (string, error) {
 	}
 	t.mu.RUnlock()
 
-	// Slow path: refresh with exponential backoff
+	// Slow path: refresh with exponential backoff.
+	// We do NOT use defer t.mu.Unlock() here: callbacks must run after the lock
+	// is released, so we unlock explicitly before each return.
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	// Double-check after acquiring write lock
 	if t.accessToken != "" && time.Now().Add(TokenRefreshMargin).Before(t.expiresAt) {
-		return t.accessToken, nil
+		tok := t.accessToken
+		t.mu.Unlock()
+		return tok, nil
 	}
 
 	var lastErr error
@@ -130,11 +133,14 @@ func (t *Token) Ensure(ctx context.Context) (string, error) {
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
+				t.mu.Unlock()
 				return "", ctx.Err()
 			}
 		}
-		tok, err := t.refresh(ctx)
+		tok, post, err := t.refresh(ctx)
 		if err == nil {
+			t.mu.Unlock()
+			post() // invoke onRefresh / onRotate outside the lock to prevent re-entry deadlock
 			return tok, nil
 		}
 		lastErr = err
@@ -143,11 +149,14 @@ func (t *Token) Ensure(ctx context.Context) (string, error) {
 			break
 		}
 	}
+	t.mu.Unlock()
 	return "", lastErr
 }
 
 // refresh performs the OAuth token exchange. Must be called with write lock held.
-func (t *Token) refresh(ctx context.Context) (string, error) {
+// Returns the new access token, a post-unlock func that fires onRefresh/onRotate
+// (never nil; safe to call immediately after unlocking), and any error.
+func (t *Token) refresh(ctx context.Context) (string, func(), error) {
 	body, _ := json.Marshal(map[string]string{
 		"grant_type":    "refresh_token",
 		"refresh_token": t.refreshToken,
@@ -164,22 +173,22 @@ func (t *Token) refresh(ctx context.Context) (string, error) {
 
 	req, err := http.NewRequestWithContext(rctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("token refresh: build request: %w", err)
+		return "", nopPost, fmt.Errorf("token refresh: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := refreshHTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("token refresh: http: %w", err)
+		return "", nopPost, fmt.Errorf("token refresh: http: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("token refresh: read body: %w", err)
+		return "", nopPost, fmt.Errorf("token refresh: read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("token refresh: status %d: %s", resp.StatusCode, raw)
+		return "", nopPost, fmt.Errorf("token refresh: status %d: %s", resp.StatusCode, raw)
 	}
 
 	var result struct {
@@ -188,10 +197,10 @@ func (t *Token) refresh(ctx context.Context) (string, error) {
 		ExpiresIn    int    `json:"expires_in"` // seconds
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", fmt.Errorf("token refresh: parse response: %w", err)
+		return "", nopPost, fmt.Errorf("token refresh: parse response: %w", err)
 	}
 	if result.AccessToken == "" {
-		return "", fmt.Errorf("token refresh: empty access_token in response")
+		return "", nopPost, fmt.Errorf("token refresh: empty access_token in response")
 	}
 
 	t.accessToken = result.AccessToken
@@ -201,15 +210,27 @@ func (t *Token) refresh(ctx context.Context) (string, error) {
 	}
 	t.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
 
-	if t.onRefresh != nil {
-		t.onRefresh(result.ExpiresIn / 60)
-	}
-	if t.onRotate != nil {
-		t.onRotate(t.refreshToken, t.accessToken, t.expiresAt)
-	}
+	// Capture everything needed for callbacks while the lock is still held.
+	// Callbacks themselves are invoked by Ensure() after the lock is released,
+	// which prevents re-entrant deadlocks (e.g. onRotate → PersistAccounts →
+	// token.ExpiresIn → t.mu.RLock on the same token that's write-locked here).
+	mins := result.ExpiresIn / 60
+	onRefresh := t.onRefresh
+	onRotate := t.onRotate
+	rt, at, exp := t.refreshToken, t.accessToken, t.expiresAt
 
-	return t.accessToken, nil
+	return t.accessToken, func() {
+		if onRefresh != nil {
+			onRefresh(mins)
+		}
+		if onRotate != nil {
+			onRotate(rt, at, exp)
+		}
+	}, nil
 }
+
+// nopPost is the no-op post-unlock function returned on error paths.
+func nopPost() {}
 
 // isPermError reports whether an error from the token endpoint should not be retried.
 func isPermError(err error) bool {

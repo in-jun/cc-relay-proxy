@@ -107,6 +107,8 @@ func (p *Pool) PersistAccounts(path string) error {
 
 // WatchRotations registers a rotate callback on every account token so that
 // whenever a refresh rotates the credentials, they are persisted to path.
+// The callback is invoked by Ensure() after it releases the token lock, so
+// PersistAccounts can safely acquire token read-locks without deadlocking.
 func (p *Pool) WatchRotations(path string) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
