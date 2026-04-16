@@ -52,6 +52,7 @@ type Pool struct {
 	mu       sync.RWMutex
 	accounts []*Account
 	active   int // index into accounts
+	fileMu   sync.Mutex // serialises all accounts-file writes (PersistAccount/PersistAccounts)
 }
 
 // ParseAccountsFile reads and parses a JSON accounts file.
@@ -88,23 +89,32 @@ func (p *Pool) PersistAccounts(path string) error {
 	}
 	p.mu.RUnlock()
 
+	p.fileMu.Lock()
+	defer p.fileMu.Unlock()
 	return writeAccountsFile(path, cfgs)
 }
 
 // PersistAccount updates a single account's token in path, reading all other
 // accounts from the existing file. This avoids overwriting other accounts with
 // potentially stale or consumed in-memory tokens (e.g. after invalid_grant).
+//
+// fileMu serialises concurrent calls so that two simultaneous rotations don't
+// race on the read-modify-write cycle and clobber each other's update.
 func (p *Pool) PersistAccount(path, name, refreshToken, accessToken string, expiresAt time.Time) error {
+	p.fileMu.Lock()
+	defer p.fileMu.Unlock()
+
 	// Read current file so we don't clobber other accounts' tokens.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		// File might not exist yet; fall back to a full in-memory write.
-		return p.PersistAccounts(path)
+		// fileMu is already held so call writeAccountsFile directly.
+		return p.persistAccountsLocked(path)
 	}
 	var cfgs []AccountConfig
 	if err := json.Unmarshal(raw, &cfgs); err != nil {
 		// Corrupt file — overwrite with full in-memory state as last resort.
-		return p.PersistAccounts(path)
+		return p.persistAccountsLocked(path)
 	}
 
 	// Update only the matching account entry; leave all others untouched.
@@ -138,6 +148,29 @@ func (p *Pool) PersistAccount(path, name, refreshToken, accessToken string, expi
 		})
 	}
 
+	return writeAccountsFile(path, cfgs)
+}
+
+// persistAccountsLocked is PersistAccounts without acquiring fileMu.
+// Must only be called while fileMu is already held.
+func (p *Pool) persistAccountsLocked(path string) error {
+	p.mu.RLock()
+	cfgs := make([]AccountConfig, len(p.accounts))
+	for i, a := range p.accounts {
+		a.token.mu.RLock()
+		rt := a.token.refreshToken
+		at := a.token.accessToken
+		exp := a.token.expiresAt
+		a.token.mu.RUnlock()
+		cfgs[i] = AccountConfig{
+			Name:         a.Name,
+			RefreshToken: rt,
+			AccessToken:  at,
+			ExpiresAt:    exp.UnixMilli(),
+			Priority:     a.priority,
+		}
+	}
+	p.mu.RUnlock()
 	return writeAccountsFile(path, cfgs)
 }
 
