@@ -684,3 +684,108 @@ func TestSetRefreshCallbackInvoked(t *testing.T) {
 		t.Errorf("callback mins: want 60, got %d", gotMins)
 	}
 }
+
+// TestPersistAccountTargeted verifies that PersistAccount only updates the
+// named account on disk and leaves all other accounts' tokens untouched.
+// This is the regression test for the bug where WatchRotations called
+// PersistAccounts (write-all-from-memory), which overwrote other accounts'
+// on-disk tokens with potentially dead/consumed in-memory tokens.
+func TestPersistAccountTargeted(t *testing.T) {
+	f, err := os.CreateTemp("", "cc-persist-targeted-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two accounts on disk with known tokens.
+	initial := `[
+  {"name":"a1","refreshToken":"rt1-disk","accessToken":"at1-disk","expiresAt":9999999999999,"priority":1},
+  {"name":"a2","refreshToken":"rt2-disk","accessToken":"at2-disk","expiresAt":9999999999999,"priority":1}
+]`
+	f.WriteString(initial)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	// Load pool from disk so in-memory state matches disk.
+	accts, err := ParseAccountsFile(f.Name())
+	if err != nil {
+		t.Fatalf("ParseAccountsFile: %v", err)
+	}
+	pool := NewPool(accts)
+
+	// Simulate a2's in-memory token going stale (invalid_grant scenario).
+	// In production this happens when a2's refresh fails; the consumed RT is
+	// kept in memory but should NOT be written to disk.
+	pool.accounts[1].token.mu.Lock()
+	pool.accounts[1].token.refreshToken = "rt2-CONSUMED-dead"
+	pool.accounts[1].token.accessToken = ""
+	pool.accounts[1].token.mu.Unlock()
+
+	// Only a1 rotated — persist just a1 with new credentials.
+	newRT, newAT := "rt1-new", "at1-new"
+	newExp := time.Now().Add(time.Hour)
+	if err := pool.PersistAccount(f.Name(), "a1", newRT, newAT, newExp); err != nil {
+		t.Fatalf("PersistAccount: %v", err)
+	}
+
+	// Reload from disk and verify:
+	// - a1 has the new tokens.
+	// - a2 still has rt2-disk (the good on-disk token), NOT rt2-CONSUMED-dead.
+	reloaded, err := ParseAccountsFile(f.Name())
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if len(reloaded) != 2 {
+		t.Fatalf("want 2 accounts, got %d", len(reloaded))
+	}
+	byName := make(map[string]*Account, len(reloaded))
+	for _, a := range reloaded {
+		byName[a.Name] = a
+	}
+	a1 := byName["a1"]
+	if a1 == nil {
+		t.Fatal("a1 missing from file")
+	}
+	a1.token.mu.RLock()
+	gotRT1 := a1.token.refreshToken
+	a1.token.mu.RUnlock()
+	if gotRT1 != newRT {
+		t.Errorf("a1 refreshToken: want %q, got %q", newRT, gotRT1)
+	}
+
+	a2 := byName["a2"]
+	if a2 == nil {
+		t.Fatal("a2 missing from file")
+	}
+	a2.token.mu.RLock()
+	gotRT2 := a2.token.refreshToken
+	a2.token.mu.RUnlock()
+	// Must be the on-disk token, not the dead in-memory one.
+	if gotRT2 == "rt2-CONSUMED-dead" {
+		t.Error("PersistAccount wrote the dead in-memory token for a2 — regression!")
+	}
+	if gotRT2 != "rt2-disk" {
+		t.Errorf("a2 refreshToken: want rt2-disk, got %q", gotRT2)
+	}
+}
+
+// TestPersistAccountFallbackOnMissingFile verifies PersistAccount falls back to
+// a full in-memory write when the file doesn't exist yet.
+func TestPersistAccountFallbackOnMissingFile(t *testing.T) {
+	dir, err := os.MkdirTemp("", "cc-persist-fallback-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	path := dir + "/accounts.json"
+
+	accts, _ := ParseAccounts(`[{"name":"a1","refreshToken":"rt1","accessToken":"at1","expiresAt":9999999999999}]`)
+	pool := NewPool(accts)
+
+	// File does not exist — should fall back to PersistAccounts without error.
+	exp := time.Now().Add(time.Hour)
+	if err := pool.PersistAccount(path, "a1", "rt1-new", "at1-new", exp); err != nil {
+		t.Fatalf("PersistAccount fallback: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("file not created by fallback: %v", err)
+	}
+}

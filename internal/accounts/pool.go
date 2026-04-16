@@ -65,6 +65,8 @@ func ParseAccountsFile(path string) ([]*Account, error) {
 
 // PersistAccounts writes the current token state of all accounts back to path
 // so that restarting the proxy doesn't lose rotated refresh tokens.
+// Only call this when you know every account's in-memory tokens are valid
+// (e.g. initial startup write). For rotation callbacks use PersistAccount.
 func (p *Pool) PersistAccounts(path string) error {
 	p.mu.RLock()
 	cfgs := make([]AccountConfig, len(p.accounts))
@@ -86,12 +88,67 @@ func (p *Pool) PersistAccounts(path string) error {
 	}
 	p.mu.RUnlock()
 
+	return writeAccountsFile(path, cfgs)
+}
+
+// PersistAccount updates a single account's token in path, reading all other
+// accounts from the existing file. This avoids overwriting other accounts with
+// potentially stale or consumed in-memory tokens (e.g. after invalid_grant).
+func (p *Pool) PersistAccount(path, name, refreshToken, accessToken string, expiresAt time.Time) error {
+	// Read current file so we don't clobber other accounts' tokens.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		// File might not exist yet; fall back to a full in-memory write.
+		return p.PersistAccounts(path)
+	}
+	var cfgs []AccountConfig
+	if err := json.Unmarshal(raw, &cfgs); err != nil {
+		// Corrupt file — overwrite with full in-memory state as last resort.
+		return p.PersistAccounts(path)
+	}
+
+	// Update only the matching account entry; leave all others untouched.
+	found := false
+	for i, c := range cfgs {
+		if c.Name == name {
+			cfgs[i].RefreshToken = refreshToken
+			cfgs[i].AccessToken = accessToken
+			cfgs[i].ExpiresAt = expiresAt.UnixMilli()
+			found = true
+			break
+		}
+	}
+	if !found {
+		// Account not in file yet — append it.
+		p.mu.RLock()
+		priority := 1
+		for _, a := range p.accounts {
+			if a.Name == name {
+				priority = a.priority
+				break
+			}
+		}
+		p.mu.RUnlock()
+		cfgs = append(cfgs, AccountConfig{
+			Name:         name,
+			RefreshToken: refreshToken,
+			AccessToken:  accessToken,
+			ExpiresAt:    expiresAt.UnixMilli(),
+			Priority:     priority,
+		})
+	}
+
+	return writeAccountsFile(path, cfgs)
+}
+
+// writeAccountsFile atomically writes cfgs to path via a temp-file rename.
+// The parent directory must be writable (use a directory bind-mount, not a
+// file bind-mount, so that os.Rename across the same filesystem succeeds).
+func writeAccountsFile(path string, cfgs []AccountConfig) error {
 	data, err := json.MarshalIndent(cfgs, "", "  ")
 	if err != nil {
 		return err
 	}
-	// Atomic write: temp file in same directory → rename.
-	// Requires the parent directory to be writable (use directory bind-mount, not file bind-mount).
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".cc-accounts-*.json")
 	if err != nil {
 		return err
@@ -106,17 +163,19 @@ func (p *Pool) PersistAccounts(path string) error {
 }
 
 // WatchRotations registers a rotate callback on every account token so that
-// whenever a refresh rotates the credentials, they are persisted to path.
+// whenever a refresh rotates the credentials, only that account's entry in
+// path is updated. Reading the file for all other accounts prevents stale or
+// consumed in-memory tokens from overwriting on-disk entries.
 // The callback is invoked by Ensure() after it releases the token lock, so
-// PersistAccounts can safely acquire token read-locks without deadlocking.
+// PersistAccount can safely acquire token read-locks without deadlocking.
 func (p *Pool) WatchRotations(path string) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, a := range p.accounts {
-		a := a // capture
-		a.token.SetRotateCallback(func(_, _ string, _ time.Time) {
-			if err := p.PersistAccounts(path); err != nil {
-				log.Printf("[accounts] failed to persist rotated tokens: %v", err)
+		name := a.Name // capture for closure
+		a.token.SetRotateCallback(func(rt, at string, exp time.Time) {
+			if err := p.PersistAccount(path, name, rt, at, exp); err != nil {
+				log.Printf("[accounts] failed to persist rotated token for %s: %v", name, err)
 			}
 		})
 	}
