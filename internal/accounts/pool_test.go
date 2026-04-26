@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -130,8 +131,8 @@ func TestSelectBestProactiveNoSwitchWhenCurrentIsBest(t *testing.T) {
 }
 
 func TestSelectBestProactiveSkippedWhenCurrentWaterZero(t *testing.T) {
-	// Both accounts have no reset-time data → WaterScore returns unknownWater (0.5).
-	// curEffective(0.5) == bestEffective(0.5) → bestEffective < curEffective is false → no switch.
+	// Both accounts have no reset-time data → WaterScore returns unknownWater (1.0).
+	// curEffective(1.0) == bestEffective(1.0) → bestEffective < curEffective is false → no switch.
 	p := makePool(2)
 	p.accounts[0].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0, SevenDayUtil: 0}
 	p.accounts[1].rateLimit = RateLimit{Status: "allowed", FiveHourUtil: 0, SevenDayUtil: 0}
@@ -193,22 +194,40 @@ func TestSoonestResetConsidersBothWindows(t *testing.T) {
 
 func TestWaterScore(t *testing.T) {
 	const eps = 1e-6
-	nonZero := time.Now().Add(1 * time.Hour) // just needs to be non-zero
+	// farFuture: no reset bonus (t >= planHours=5h) → score = max(5h_util, 7d_util).
+	farFuture := time.Now().Add(200 * time.Hour)
 
-	// 0.7*0.64 + 0.3*0.27 = 0.448 + 0.081 = 0.529
-	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27, FiveHourReset: nonZero, SevenDayReset: nonZero}
-	ws := WaterScore(rl)
-	want := 0.7*0.64 + 0.3*0.27
-	if ws < want-eps || ws > want+eps {
-		t.Errorf("want %.6f, got %.6f", want, ws)
+	// 5h dominates: max(0.64, 0.27) = 0.64
+	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27, FiveHourReset: farFuture, SevenDayReset: farFuture}
+	if ws := WaterScore(rl); math.Abs(ws-0.64) > eps {
+		t.Errorf("5h dominates: want 0.64, got %f", ws)
 	}
 
-	// 7d has higher raw util: 0.7*0.10 + 0.3*0.81 = 0.07 + 0.243 = 0.313
-	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81, FiveHourReset: nonZero, SevenDayReset: nonZero}
-	ws2 := WaterScore(rl2)
-	want2 := 0.7*0.10 + 0.3*0.81
-	if ws2 < want2-eps || ws2 > want2+eps {
-		t.Errorf("want %.6f, got %.6f", want2, ws2)
+	// 7d dominates: max(0.10, 0.81) = 0.81
+	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81, FiveHourReset: farFuture, SevenDayReset: farFuture}
+	if ws := WaterScore(rl2); math.Abs(ws-0.81) > eps {
+		t.Errorf("7d dominates: want 0.81, got %f", ws)
+	}
+
+	// 5h reset in 2.5h: bonus = (5-2.5)/5 = 0.50 → adj5h = max(0, 0.90-0.50) = 0.40
+	// adj7d = 0.10 (no bonus) → score = max(0.40, 0.10) = 0.40
+	reset5h := time.Now().Add(150 * time.Minute) // 2.5h
+	rl3 := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.10, FiveHourReset: reset5h, SevenDayReset: farFuture}
+	if ws := WaterScore(rl3); math.Abs(ws-0.40) > eps {
+		t.Errorf("reset bonus 2.5h: want 0.40, got %f", ws)
+	}
+
+	// 5h reset in 5min (0.083h): bonus = (5-0.083)/5 = 0.983 → adj5h = max(0, 0.90-0.983) = 0
+	// adj7d = 0.05 → score = 0.05 (near-reset account ranked almost free)
+	reset5min := time.Now().Add(5 * time.Minute)
+	rl4 := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.05, FiveHourReset: reset5min, SevenDayReset: farFuture}
+	if ws := WaterScore(rl4); math.Abs(ws-0.05) > eps {
+		t.Errorf("reset imminent: want 0.05, got %f", ws)
+	}
+
+	// Unknown (zero resets) → unknownWater = 1.0
+	if ws := WaterScore(RateLimit{}); ws != unknownWater {
+		t.Errorf("unknown: want 1.0, got %f", ws)
 	}
 }
 

@@ -339,20 +339,55 @@ func (p *Pool) RateLimitFor(name string) RateLimit {
 	return rl
 }
 
-// WaterScore computes the selection score for an account (lower = preferred).
-//
-// Score = 0.7×5h_util + 0.3×7d_util
-//
-// unknownWater is returned when no rate-limit data has arrived yet (e.g. startup
-// ping failed). 1.0 (worst possible) keeps uninitialized accounts at the back of
-// the queue until a real ping updates their state.
+// planHours is the look-ahead window used when forecasting reset bonuses.
+// Matches the 5h rate-limit window: resets within the next 5 hours are
+// credited in advance; 7d resets almost never fall within this horizon.
+const planHours = 5.0
+
+// unknownWater is the score returned when no rate-limit data has arrived yet
+// (e.g. startup ping failed). 1.0 keeps uninitialized accounts at the back
+// of the queue until a real ping updates their state.
 const unknownWater = 1.0
 
+// WaterScore computes the DRF-Forecast selection score (lower = preferred).
+//
+// Algorithm: Dominant Resource Fairness (Ghodsi et al., NSDI 2011) extended
+// with a look-ahead capacity forecast over a planHours horizon.
+//
+//	adj_X  = max(0, X_util − resetBonus(X_reset, planHours, X_windowHours))
+//	score  = max(adj_5h, adj_7d)
+//
+// resetBonus pre-credits capacity that will be recovered within planHours,
+// so accounts about to reset rank as if their utilization is already lower —
+// without suppressing the 7d dimension when its reset is far away.
+//
+// The max() operator (DRF dominant share) ensures the tighter constraint
+// drives selection: if 7d is almost exhausted it dominates regardless of
+// 5h headroom, and vice versa.
 func WaterScore(rl RateLimit) float64 {
 	if rl.FiveHourReset.IsZero() && rl.SevenDayReset.IsZero() {
 		return unknownWater
 	}
-	return 0.7*rl.FiveHourUtil + 0.3*rl.SevenDayUtil
+	adj5h := math.Max(0, rl.FiveHourUtil-resetBonus(rl.FiveHourReset, planHours, planHours))
+	adj7d := math.Max(0, rl.SevenDayUtil-resetBonus(rl.SevenDayReset, planHours, 7*24))
+	return math.Max(adj5h, adj7d)
+}
+
+// resetBonus returns the fraction of a rate-limit window that will be
+// recovered within the planning horizon h (hours), normalised to windowHours.
+//
+// For the 5h window (windowHours=5, h=5): bonus = (5−t)/5, t in (0,5).
+// For the 7d window (windowHours=168, h=5): bonus ≈ 0 in practice because
+// 7d resets almost never occur within a 5-hour planning window.
+func resetBonus(reset time.Time, h, windowHours float64) float64 {
+	if reset.IsZero() {
+		return 0
+	}
+	t := time.Until(reset).Hours()
+	if t <= 0 || t >= h {
+		return 0
+	}
+	return (h - t) / windowHours
 }
 
 // priorityBandSize is the water score offset applied per priority level.
