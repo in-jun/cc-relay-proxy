@@ -232,6 +232,12 @@ func (p *Pinger) pingAccount(ctx context.Context, name string) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		p.pool.InvalidateToken(name)
+		log.Printf("[pinger] 401 for %s — token invalidated for next refresh", name)
+		p.log.Log("error", name, map[string]any{"code": "ping_401", "status": 401, "body": string(body)})
+		return
+	}
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[pinger] unexpected status %d for %s: %s", resp.StatusCode, name, body)
 		p.log.Log("error", name, map[string]any{"code": "ping_non200", "status": resp.StatusCode, "body": string(body)})
