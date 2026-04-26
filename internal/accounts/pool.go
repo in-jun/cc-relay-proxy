@@ -399,10 +399,9 @@ func timeDecay7d(reset time.Time) float64 {
 // Time-decay naturally de-prioritizes accounts far from their reset window and
 // promotes accounts that are near reset (effectively free capacity soon).
 // unknownWater is the water score returned when no rate-limit data has arrived
-// yet (e.g. startup ping failed). Returning 0 would make the account look like
-// the best choice and trigger a proactive switch onto a potentially broken
-// account. 0.5 keeps it neutral until a real ping updates the state.
-const unknownWater = 0.5
+// yet (e.g. startup ping failed). 1.0 (worst possible) keeps uninitialized
+// accounts at the back of the queue until a real ping updates their state.
+const unknownWater = 1.0
 
 func WaterScore(rl RateLimit) float64 {
 	// No rate-limit data yet — treat as neutral, not "best available".

@@ -238,6 +238,14 @@ func (p *Pinger) pingAccount(ctx context.Context, name string) {
 		p.log.Log("error", name, map[string]any{"code": "ping_401", "status": 401, "body": string(body)})
 		return
 	}
+	if resp.StatusCode == http.StatusForbidden {
+		existing := p.pool.RateLimitFor(name)
+		existing.Status = "rejected"
+		p.pool.UpdateRateLimit(name, existing)
+		log.Printf("[pinger] 403 for %s — marked rejected (OAuth not allowed)", name)
+		p.log.Log("error", name, map[string]any{"code": "ping_403", "status": 403, "body": string(body)})
+		return
+	}
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[pinger] unexpected status %d for %s: %s", resp.StatusCode, name, body)
 		p.log.Log("error", name, map[string]any{"code": "ping_non200", "status": resp.StatusCode, "body": string(body)})
