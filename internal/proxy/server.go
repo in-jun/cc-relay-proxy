@@ -84,7 +84,10 @@ func New(pool *accounts.Pool, l *logger.Logger) *Server {
 // NewWithTarget creates a Server targeting the given base URL.
 // Primarily used in tests to point at a fake upstream.
 func NewWithTarget(pool *accounts.Pool, l *logger.Logger, targetURL string) *Server {
-	target, _ := url.Parse(targetURL)
+	target, err := url.Parse(targetURL)
+	if err != nil {
+		panic("cc-relay-proxy: invalid target URL: " + err.Error())
+	}
 	s := &Server{
 		pool:   pool,
 		log:    l,
@@ -185,8 +188,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
-			action := s.handle429(r.Context(), w, r, resp, accountName, start, hasRL)
-			if action == "retry" {
+			if s.handle429(r.Context(), w, r, resp, accountName, start, hasRL) {
 				continue
 			}
 			return
@@ -275,9 +277,9 @@ func (s *Server) sendRequest(r *http.Request, bodyBuf []byte, tok string) (*http
 	return resp, nil
 }
 
-// handle429 processes a 429 response: tries to switch accounts or hold, then either
-// returns "retry" (caller should continue the attempt loop) or "done" (response sent).
-func (s *Server) handle429(ctx context.Context, w http.ResponseWriter, r *http.Request, resp *http.Response, accountName string, start time.Time, hasRL bool) string {
+// handle429 processes a 429 response: tries to switch accounts or hold.
+// Returns true if the caller should retry the request, false if the response has been sent.
+func (s *Server) handle429(ctx context.Context, w http.ResponseWriter, r *http.Request, resp *http.Response, accountName string, start time.Time, hasRL bool) bool {
 	if !hasRL {
 		existing := s.pool.RateLimitFor(accountName)
 		existing.Status = "rejected"
@@ -301,7 +303,7 @@ func (s *Server) handle429(ctx context.Context, w http.ResponseWriter, r *http.R
 		})
 		s.pinger.PingAfterSwitch(accountName)
 		resp.Body.Close()
-		return "retry"
+		return true
 	}
 
 	if s.pool.AllRejected() {
@@ -314,9 +316,9 @@ func (s *Server) handle429(ctx context.Context, w http.ResponseWriter, r *http.R
 			select {
 			case <-time.After(waitDur):
 			case <-ctx.Done():
-				return "done"
+				return false
 			}
-			return "retry"
+			return true
 		}
 		s.log.Log("all_blocked", "", map[string]any{"reason": "all_rejected_wait_too_long"})
 	} else {
@@ -341,7 +343,7 @@ func (s *Server) handle429(ctx context.Context, w http.ResponseWriter, r *http.R
 		"sevenDay":  fwdRL.SevenDayUtil,
 		"water":     accounts.WaterScore(fwdRL),
 	})
-	return "done"
+	return false
 }
 
 // streamResponse writes resp.Body to w, flushing after each chunk for SSE.

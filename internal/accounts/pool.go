@@ -367,9 +367,12 @@ const unknownWater = 1.0
 //	adj_d = max(0, u_d − pace_d)
 //
 // adj_d = 0  → at or below pace; at current rate the account will not
-//              exhaust its quota before the window resets.
+//
+//	exhaust its quota before the window resets.
+//
 // adj_d > 0  → above pace; if usage continues at this rate the quota will
-//              be exhausted before reset, risking a 429.
+//
+//	be exhausted before reset, risking a 429.
 //
 // Verification:
 //

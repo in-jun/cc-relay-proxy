@@ -224,18 +224,6 @@ func TestFormatAgo(t *testing.T) {
 	}
 }
 
-func TestMaxInt(t *testing.T) {
-	if max(3, 5) != 5 {
-		t.Error("max(3,5) should be 5")
-	}
-	if max(7, 2) != 7 {
-		t.Error("max(7,2) should be 7")
-	}
-	if max(4, 4) != 4 {
-		t.Error("max(4,4) should be 4")
-	}
-}
-
 func TestServerHandlerAndPinger(t *testing.T) {
 	pool := newTestPool()
 	l := newTestLogger(t)
