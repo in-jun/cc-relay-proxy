@@ -138,21 +138,24 @@ func (p *Pinger) checkAndPingResets(ctx context.Context, scheduled map[string]ti
 			continue
 		}
 
-		// Check that a reset window has passed so recovery is possible.
-		resetPassed := (!rl.FiveHourReset.IsZero() && !rl.FiveHourReset.After(now)) ||
-			(!rl.SevenDayReset.IsZero() && !rl.SevenDayReset.After(now))
-		if !resetPassed {
-			continue // reset hasn't arrived yet
+		// Accounts with reset-time data wait until the window passes.
+		// Accounts with no reset data (e.g. 403 permission errors) are retried
+		// on cooldown — there is no reset window to wait for.
+		hasResetData := !rl.FiveHourReset.IsZero() || !rl.SevenDayReset.IsZero()
+		if hasResetData {
+			resetPassed := (!rl.FiveHourReset.IsZero() && !rl.FiveHourReset.After(now)) ||
+				(!rl.SevenDayReset.IsZero() && !rl.SevenDayReset.After(now))
+			if !resetPassed {
+				continue
+			}
 		}
 
-		// Rate-limit pings to one per resetCheckInterval. Storing the fire time
-		// (not the reset time) means a failed ping (no LastSeen update) is retried
-		// after the cooldown without any fragile LastSeen comparison.
+		// Rate-limit pings to one per resetCheckInterval.
 		if lastFired, ok := scheduled[snap.Name]; ok && time.Since(lastFired) < resetCheckInterval {
 			continue
 		}
 		scheduled[snap.Name] = now
-		log.Printf("[pinger] reset arrived for %s, pinging to confirm availability", snap.Name)
+		log.Printf("[pinger] pinging rejected account %s to check recovery", snap.Name)
 		go p.pingAccount(ctx, snap.Name)
 	}
 }
