@@ -138,16 +138,13 @@ func (p *Pinger) checkAndPingResets(ctx context.Context, scheduled map[string]ti
 			continue
 		}
 
-		// Accounts with reset-time data wait until the window passes.
-		// Accounts with no reset data (e.g. 403 permission errors) are retried
-		// on cooldown — there is no reset window to wait for.
-		hasResetData := !rl.FiveHourReset.IsZero() || !rl.SevenDayReset.IsZero()
-		if hasResetData {
-			resetPassed := (!rl.FiveHourReset.IsZero() && !rl.FiveHourReset.After(now)) ||
-				(!rl.SevenDayReset.IsZero() && !rl.SevenDayReset.After(now))
-			if !resetPassed {
-				continue
-			}
+		// Only ping once a rate-limit reset window has passed.
+		// Rejected accounts with no reset-time data (e.g. 403 permission errors)
+		// are retried by pingInactiveAccounts every inactivePingInterval instead.
+		resetPassed := (!rl.FiveHourReset.IsZero() && !rl.FiveHourReset.After(now)) ||
+			(!rl.SevenDayReset.IsZero() && !rl.SevenDayReset.After(now))
+		if !resetPassed {
+			continue
 		}
 
 		// Rate-limit pings to one per resetCheckInterval.
@@ -155,7 +152,7 @@ func (p *Pinger) checkAndPingResets(ctx context.Context, scheduled map[string]ti
 			continue
 		}
 		scheduled[snap.Name] = now
-		log.Printf("[pinger] pinging rejected account %s to check recovery", snap.Name)
+		log.Printf("[pinger] reset arrived for %s, pinging to confirm availability", snap.Name)
 		go p.pingAccount(ctx, snap.Name)
 	}
 }
