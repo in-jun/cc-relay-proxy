@@ -133,11 +133,8 @@ func (p *Pool) PersistAccount(path, name, refreshToken, accessToken string, expi
 		// Account not in file yet — append it.
 		p.mu.RLock()
 		priority := 1
-		for _, a := range p.accounts {
-			if a.Name == name {
-				priority = a.priority
-				break
-			}
+		if a := p.byName[name]; a != nil {
+			priority = a.priority
 		}
 		p.mu.RUnlock()
 		cfgs = append(cfgs, AccountConfig{

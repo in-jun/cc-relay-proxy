@@ -320,7 +320,10 @@ func (s *Server) handle429(ctx context.Context, w http.ResponseWriter, r *http.R
 		}
 		s.log.Log("all_blocked", "", map[string]any{"reason": "all_rejected_wait_too_long"})
 	} else {
-		s.log.Log("all_blocked", "", map[string]any{"reason": "all_in_caution"})
+		// Some accounts are still "allowed" or "allowed_warning" but none has a
+		// lower effective water score than current — current is still the best
+		// despite having just received a 429. Forward the error.
+		s.log.Log("no_switch", "", map[string]any{"reason": "current_is_best_despite_429"})
 	}
 
 	fwdRL := s.pool.RateLimitFor(accountName)
