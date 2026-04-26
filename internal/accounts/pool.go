@@ -344,41 +344,63 @@ func (p *Pool) RateLimitFor(name string) RateLimit {
 // of the queue until a real ping updates their state.
 const unknownWater = 1.0
 
-// WaterScore computes the DRF-Forecast selection score (lower = preferred).
+// WaterScore returns the effective-load score for an account (lower = preferred).
 //
-// Algorithm: Dominant Resource Fairness (Ghodsi et al., NSDI 2011) extended
-// with a symmetric look-ahead capacity forecast over each window's own horizon.
+// # Design
 //
-//	adj_5h = max(0, 5h_util − resetBonus(5h_reset, 5h))
-//	adj_7d = max(0, 7d_util − resetBonus(7d_reset, 168h))
-//	score  = max(adj_5h, adj_7d)
+// Anthropic enforces two independent periodic token-bucket windows:
 //
-// resetBonus(reset, W) = (W − t) / W for t ∈ (0, W), else 0.
-// Each window uses its own size as the planning horizon so both dimensions
-// are treated symmetrically: an account whose 5h resets in 1h gets the
-// same proportional credit as one whose 7d resets in 20h.
+//	dimension d ∈ {5h, 7d}
+//	  capacity  C_d  (normalized to 1.0)
+//	  consumed  u_d  (0.0–1.0, reported as utilization)
+//	  resets in t_d  hours from now
+//	  window    W_d  (5h or 168h)
 //
-// The max() operator (DRF dominant share) ensures the tighter constraint
-// drives selection regardless of which window it comes from.
+// At the reset time, all consumed tokens are returned. The capacity that will
+// be automatically recovered when the window resets in t_d hours is:
+//
+//	recovered_d = (W_d − t_d) / W_d
+//
+// That is the fraction of the window that has already elapsed — the same
+// fraction of capacity is already "earned back" and waiting to be released.
+//
+// The net permanently-consumed fraction (capacity consumed beyond the next
+// reset) for each dimension is:
+//
+//	adj_d = max(0, u_d − recovered_d)
+//	      = max(0, u_d − (W_d − t_d) / W_d)   for t_d ∈ (0, W_d)
+//	      = u_d                                 for t_d ≥ W_d (reset out of horizon)
+//
+// Using each window's own size as the planning horizon ensures both dimensions
+// are treated symmetrically: an account whose 5h resets in 1h gets the same
+// proportional credit as one whose 7d resets in 20h.
+//
+// The final score is the dominant (worst) dimension:
+//
+//	score = max(adj_5h, adj_7d)
+//
+// This ensures a heavily loaded window drives the score even when the other is
+// healthy — you cannot freely use an account whose 7d quota is exhausted.
 func WaterScore(rl RateLimit) float64 {
 	if rl.FiveHourReset.IsZero() && rl.SevenDayReset.IsZero() {
 		return unknownWater
 	}
-	adj5h := math.Max(0, rl.FiveHourUtil-resetBonus(rl.FiveHourReset, 5))
-	adj7d := math.Max(0, rl.SevenDayUtil-resetBonus(rl.SevenDayReset, 7*24))
+	adj5h := math.Max(0, rl.FiveHourUtil-recovered(rl.FiveHourReset, 5))
+	adj7d := math.Max(0, rl.SevenDayUtil-recovered(rl.SevenDayReset, 7*24))
 	return math.Max(adj5h, adj7d)
 }
 
-// resetBonus returns the fraction of a rate-limit window that will be
-// recovered before the next reset, normalised to the window size W (hours).
+// recovered returns the fraction of a rate-limit window that will be
+// automatically returned at the upcoming reset, normalised to [0, 1].
 //
-//	bonus = (W − t) / W   for t ∈ (0, W)
-//	      = 0             if t ≥ W (reset too far away)
-//	      = 0             if reset is zero (no data)
+//	recovered = (W − t) / W   for t ∈ (0, W)
+//	          = 0             if t ≥ W  (reset beyond planning horizon)
+//	          = 0             if reset is zero (no data)
 //
-// Interpretation: an account whose window resets in t hours has already
-// "earned back" (W−t)/W of its capacity — it will be fully fresh in t hours.
-func resetBonus(reset time.Time, windowHours float64) float64 {
+// W is the window size in hours; t is hours until reset.
+// The formula is the fraction of the window that has already elapsed:
+// that same fraction of capacity is waiting to be released at reset time.
+func recovered(reset time.Time, windowHours float64) float64 {
 	if reset.IsZero() {
 		return 0
 	}
