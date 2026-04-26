@@ -202,6 +202,9 @@ func (t *Token) refresh(ctx context.Context) (string, func(), error) {
 	if result.AccessToken == "" {
 		return "", nopPost, fmt.Errorf("token refresh: empty access_token in response")
 	}
+	if result.ExpiresIn <= 0 {
+		return "", nopPost, fmt.Errorf("token refresh: invalid expires_in %d in response", result.ExpiresIn)
+	}
 
 	t.accessToken = result.AccessToken
 	// RTR: keep existing refresh token if server didn't return a new one

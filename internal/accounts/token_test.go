@@ -280,6 +280,29 @@ func TestRefreshEmptyAccessToken(t *testing.T) {
 	}
 }
 
+func TestRefreshZeroExpiresIn(t *testing.T) {
+	// Server returns expires_in:0 — must be rejected to prevent a refresh loop
+	// (expiresAt would be set to time.Now(), causing every subsequent Ensure
+	// to re-enter the slow path and refresh again indefinitely).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "tok",
+			"expires_in":   0,
+		})
+	}))
+	defer srv.Close()
+
+	orig := SetTokenEndpoint(srv.URL)
+	defer SetTokenEndpoint(orig)
+
+	tok := newToken("rt")
+	_, err := tok.Ensure(context.Background())
+	if err == nil {
+		t.Fatal("expected error for expires_in=0")
+	}
+}
+
 func TestExpiresIn(t *testing.T) {
 	tok := &Token{}
 	if s := tok.ExpiresIn(); s != "not refreshed" {
