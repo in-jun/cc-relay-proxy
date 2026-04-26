@@ -246,15 +246,22 @@ func (p *Pinger) pingAccount(ctx context.Context, name string) {
 		p.log.Log("error", name, map[string]any{"code": "ping_403", "status": 403, "body": string(body)})
 		return
 	}
+
+	// Parse rate limit headers from all responses (200 and non-200 alike).
+	// The API includes these headers even on 429 responses, so we always
+	// update account state regardless of whether the ping succeeded.
+	rl, hasRL := accounts.ParseRateLimitHeaders(resp.Header)
+	if hasRL {
+		p.pool.UpdateRateLimit(name, rl)
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[pinger] unexpected status %d for %s: %s", resp.StatusCode, name, body)
 		p.log.Log("error", name, map[string]any{"code": "ping_non200", "status": resp.StatusCode, "body": string(body)})
 		return
 	}
 
-	rl, hasRL := accounts.ParseRateLimitHeaders(resp.Header)
 	if hasRL {
-		p.pool.UpdateRateLimit(name, rl)
 		p.log.Log("ping", name, map[string]any{
 			"fiveHour":  rl.FiveHourUtil,
 			"sevenDay":  rl.SevenDayUtil,
