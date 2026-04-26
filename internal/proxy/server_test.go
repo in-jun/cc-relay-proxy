@@ -225,14 +225,14 @@ func TestFormatAgo(t *testing.T) {
 }
 
 func TestMaxInt(t *testing.T) {
-	if maxInt(3, 5) != 5 {
-		t.Error("maxInt(3,5) should be 5")
+	if max(3, 5) != 5 {
+		t.Error("max(3,5) should be 5")
 	}
-	if maxInt(7, 2) != 7 {
-		t.Error("maxInt(7,2) should be 7")
+	if max(7, 2) != 7 {
+		t.Error("max(7,2) should be 7")
 	}
-	if maxInt(4, 4) != 4 {
-		t.Error("maxInt(4,4) should be 4")
+	if max(4, 4) != 4 {
+		t.Error("max(4,4) should be 4")
 	}
 }
 

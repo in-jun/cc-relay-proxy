@@ -51,8 +51,9 @@ type Account struct {
 type Pool struct {
 	mu       sync.RWMutex
 	accounts []*Account
-	active   int // index into accounts
-	fileMu   sync.Mutex // serialises all accounts-file writes (PersistAccount/PersistAccounts)
+	byName   map[string]*Account // index for O(1) name lookups; populated once in NewPool
+	active   int                 // index into accounts
+	fileMu   sync.Mutex          // serialises all accounts-file writes (PersistAccount/PersistAccounts)
 }
 
 // ParseAccountsFile reads and parses a JSON accounts file.
@@ -249,8 +250,13 @@ func ParseAccounts(data string) ([]*Account, error) {
 
 // NewPool creates a Pool from the given accounts.
 func NewPool(accounts []*Account) *Pool {
+	idx := make(map[string]*Account, len(accounts))
+	for _, a := range accounts {
+		idx[a.Name] = a
+	}
 	return &Pool{
 		accounts: accounts,
+		byName:   idx,
 		active:   0,
 	}
 }
@@ -288,13 +294,7 @@ func (p *Pool) ActiveTokenWithName(ctx context.Context) (token, name string, err
 // TokenFor returns a valid access token for a named account.
 func (p *Pool) TokenFor(ctx context.Context, name string) (string, error) {
 	p.mu.RLock()
-	var acct *Account
-	for _, a := range p.accounts {
-		if a.Name == name {
-			acct = a
-			break
-		}
-	}
+	acct := p.byName[name]
 	p.mu.RUnlock()
 	if acct == nil {
 		return "", fmt.Errorf("account %q not found", name)
@@ -307,13 +307,7 @@ func (p *Pool) TokenFor(ctx context.Context, name string) (string, error) {
 // Used when the API returns 401 to recover without dropping the request.
 func (p *Pool) InvalidateToken(name string) {
 	p.mu.RLock()
-	var acct *Account
-	for _, a := range p.accounts {
-		if a.Name == name {
-			acct = a
-			break
-		}
-	}
+	acct := p.byName[name]
 	p.mu.RUnlock()
 	if acct != nil {
 		acct.token.Invalidate()
@@ -323,13 +317,7 @@ func (p *Pool) InvalidateToken(name string) {
 // UpdateRateLimit records parsed rate limit headers for the named account.
 func (p *Pool) UpdateRateLimit(name string, rl RateLimit) {
 	p.mu.RLock()
-	var acct *Account
-	for _, a := range p.accounts {
-		if a.Name == name {
-			acct = a
-			break
-		}
-	}
+	acct := p.byName[name]
 	p.mu.RUnlock()
 	if acct == nil {
 		return
@@ -343,16 +331,15 @@ func (p *Pool) UpdateRateLimit(name string, rl RateLimit) {
 // RateLimitFor returns the current rate limit state for the named account.
 func (p *Pool) RateLimitFor(name string) RateLimit {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, a := range p.accounts {
-		if a.Name == name {
-			a.mu.RLock()
-			rl := a.rateLimit
-			a.mu.RUnlock()
-			return rl
-		}
+	acct := p.byName[name]
+	p.mu.RUnlock()
+	if acct == nil {
+		return RateLimit{}
 	}
-	return RateLimit{}
+	acct.mu.RLock()
+	rl := acct.rateLimit
+	acct.mu.RUnlock()
+	return rl
 }
 
 const (

@@ -162,7 +162,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		resp, rawBody, err := s.sendRequest(r, bodyBuf, tok)
+		resp, err := s.sendRequest(r, bodyBuf, tok)
 		if err != nil {
 			log.Printf("[proxy] upstream error: %v", err)
 			s.log.Log("error", accountName, map[string]any{"code": "upstream_error", "msg": err.Error()})
@@ -185,78 +185,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
-			// If 429 but no rate limit headers, force status to "rejected" so SelectBest switches
-			if !hasRL {
-				existing := s.pool.RateLimitFor(accountName)
-				existing.Status = "rejected"
-				s.pool.UpdateRateLimit(accountName, existing)
-			}
-			resp.Body.Close()
-			s.stats.Total429.Add(1)
-
-			// Try another account
-			prev429Account := accountName
-			nextName, _, switched2, reason2 := s.pool.SelectBest()
-			if switched2 {
-				s.stats.TotalSwitches.Add(1)
-				actualRL := s.pool.RateLimitFor(prev429Account)
-				s.log.Log("account_switched", nextName, map[string]any{
-					"from":            prev429Account,
-					"to":              nextName,
-					"reason":          reason2,
-					"fiveHour_before": actualRL.FiveHourUtil,
-				})
-				s.log.Log("429_received", prev429Account, map[string]any{
-					"action":   "switch",
-					"fiveHour": actualRL.FiveHourUtil,
-				})
-				// Ping previous account in background to measure recovery speed
-				s.pinger.PingAfterSwitch(prev429Account)
+			action := s.handle429(r.Context(), w, r, resp, accountName, start, hasRL)
+			if action == "retry" {
 				continue
 			}
-
-			// No switch available — all accounts blocked or in caution
-			allRejected := s.pool.AllRejected()
-			if allRejected {
-				soonest := s.pool.SoonestReset()
-				waitDur := time.Until(soonest)
-				if waitDur > 0 && waitDur <= ProxyHoldMax {
-					s.log.Log("all_blocked", "", map[string]any{"reason": "all_rejected", "waitSec": waitDur.Seconds()})
-					s.log.Log("429_received", accountName, map[string]any{
-						"action":  "hold",
-						"waitSec": waitDur.Seconds(),
-					})
-					select {
-					case <-time.After(waitDur):
-					case <-r.Context().Done():
-						return
-					}
-					continue
-				}
-				s.log.Log("all_blocked", "", map[string]any{"reason": "all_rejected_wait_too_long"})
-			} else {
-				s.log.Log("all_blocked", "", map[string]any{"reason": "all_in_caution"})
-			}
-
-			// Forward 429
-			fwdRL := s.pool.RateLimitFor(accountName)
-			s.log.Log("429_received", accountName, map[string]any{
-				"action":   "forward",
-				"fiveHour": fwdRL.FiveHourUtil,
-			})
-			copyHeaders(w.Header(), resp.Header)
-			w.WriteHeader(resp.StatusCode)
-			w.Write(rawBody)
-
-			s.log.Log("request", accountName, map[string]any{
-				"method":    r.Method,
-				"path":      r.URL.Path,
-				"status":    resp.StatusCode,
-				"latencyMs": time.Since(start).Milliseconds(),
-				"fiveHour":  fwdRL.FiveHourUtil,
-				"sevenDay":  fwdRL.SevenDayUtil,
-				"water":     accounts.WaterScore(fwdRL),
-			})
 			return
 		}
 
@@ -277,27 +209,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// Success (or non-retryable error) — stream response without buffering
 		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-
-		if isSSE(resp) {
-			flusher, canFlush := w.(http.Flusher)
-			bufPtr := ssePool.Get().(*[]byte)
-			buf := *bufPtr
-			for {
-				n, readErr := resp.Body.Read(buf)
-				if n > 0 {
-					w.Write(buf[:n])
-					if canFlush {
-						flusher.Flush()
-					}
-				}
-				if readErr != nil {
-					break
-				}
-			}
-			ssePool.Put(bufPtr)
-		} else {
-			io.Copy(w, resp.Body)
-		}
+		s.streamResponse(w, resp)
 		resp.Body.Close()
 
 		// Include current rate-limit state in every request log for analysis.
@@ -320,14 +232,16 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 // sendRequest clones the incoming request, replaces Authorization, and sends to upstream.
-func (s *Server) sendRequest(r *http.Request, bodyBuf []byte, tok string) (*http.Response, []byte, error) {
+// For 429 responses the body is read into memory and the resp.Body is replaced with a
+// readable NopCloser so callers can forward it without a separate rawBody return value.
+func (s *Server) sendRequest(r *http.Request, bodyBuf []byte, tok string) (*http.Response, error) {
 	upstreamURL := *s.target
 	upstreamURL.Path = r.URL.Path
 	upstreamURL.RawQuery = r.URL.RawQuery
 
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL.String(), bytes.NewReader(bodyBuf))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for k, vv := range r.Header {
 		for _, v := range vv {
@@ -349,17 +263,106 @@ func (s *Server) sendRequest(r *http.Request, bodyBuf []byte, tok string) (*http
 
 	resp, err := upstreamClient.Do(outReq)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return resp, body, nil
 	}
 
-	return resp, nil, nil
+	return resp, nil
+}
+
+// handle429 processes a 429 response: tries to switch accounts or hold, then either
+// returns "retry" (caller should continue the attempt loop) or "done" (response sent).
+func (s *Server) handle429(ctx context.Context, w http.ResponseWriter, r *http.Request, resp *http.Response, accountName string, start time.Time, hasRL bool) string {
+	if !hasRL {
+		existing := s.pool.RateLimitFor(accountName)
+		existing.Status = "rejected"
+		s.pool.UpdateRateLimit(accountName, existing)
+	}
+	s.stats.Total429.Add(1)
+
+	nextName, _, switched, reason := s.pool.SelectBest()
+	if switched {
+		s.stats.TotalSwitches.Add(1)
+		actualRL := s.pool.RateLimitFor(accountName)
+		s.log.Log("account_switched", nextName, map[string]any{
+			"from":            accountName,
+			"to":              nextName,
+			"reason":          reason,
+			"fiveHour_before": actualRL.FiveHourUtil,
+		})
+		s.log.Log("429_received", accountName, map[string]any{
+			"action":   "switch",
+			"fiveHour": actualRL.FiveHourUtil,
+		})
+		s.pinger.PingAfterSwitch(accountName)
+		resp.Body.Close()
+		return "retry"
+	}
+
+	if s.pool.AllRejected() {
+		soonest := s.pool.SoonestReset()
+		waitDur := time.Until(soonest)
+		if waitDur > 0 && waitDur <= ProxyHoldMax {
+			s.log.Log("all_blocked", "", map[string]any{"reason": "all_rejected", "waitSec": waitDur.Seconds()})
+			s.log.Log("429_received", accountName, map[string]any{"action": "hold", "waitSec": waitDur.Seconds()})
+			resp.Body.Close()
+			select {
+			case <-time.After(waitDur):
+			case <-ctx.Done():
+				return "done"
+			}
+			return "retry"
+		}
+		s.log.Log("all_blocked", "", map[string]any{"reason": "all_rejected_wait_too_long"})
+	} else {
+		s.log.Log("all_blocked", "", map[string]any{"reason": "all_in_caution"})
+	}
+
+	fwdRL := s.pool.RateLimitFor(accountName)
+	s.log.Log("429_received", accountName, map[string]any{"action": "forward", "fiveHour": fwdRL.FiveHourUtil})
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+	resp.Body.Close()
+	s.log.Log("request", accountName, map[string]any{
+		"method":    r.Method,
+		"path":      r.URL.Path,
+		"status":    resp.StatusCode,
+		"latencyMs": time.Since(start).Milliseconds(),
+		"fiveHour":  fwdRL.FiveHourUtil,
+		"sevenDay":  fwdRL.SevenDayUtil,
+		"water":     accounts.WaterScore(fwdRL),
+	})
+	return "done"
+}
+
+// streamResponse writes resp.Body to w, flushing after each chunk for SSE.
+func (s *Server) streamResponse(w http.ResponseWriter, resp *http.Response) {
+	if !isSSE(resp) {
+		io.Copy(w, resp.Body)
+		return
+	}
+	flusher, canFlush := w.(http.Flusher)
+	bufPtr := ssePool.Get().(*[]byte)
+	buf := *bufPtr
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			w.Write(buf[:n])
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	ssePool.Put(bufPtr)
 }
 
 // DoUpstreamRequest sends a request to the upstream target with the given token.
@@ -424,8 +427,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	accts := make([]acctStatus, len(acctSnaps))
 	for i, a := range acctSnaps {
 		rl := a.RateLimit
-		fiveReset := maxInt(0, int(time.Until(rl.FiveHourReset).Minutes()))
-		sevenReset := maxInt(0, int(time.Until(rl.SevenDayReset).Hours()))
+		fiveReset := max(0, int(time.Until(rl.FiveHourReset).Minutes()))
+		sevenReset := max(0, int(time.Until(rl.SevenDayReset).Hours()))
 		lastSeenStr := "never"
 		if !rl.LastSeen.IsZero() {
 			lastSeenStr = formatAgo(time.Since(rl.LastSeen))
@@ -465,13 +468,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	enc.Encode(status)
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func formatAgo(d time.Duration) string {
