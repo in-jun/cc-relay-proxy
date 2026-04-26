@@ -342,65 +342,20 @@ func (p *Pool) RateLimitFor(name string) RateLimit {
 	return rl
 }
 
-const (
-	window5hMins  = 5 * 60 // 300 minutes in a 5h quota window
-	window7dHours = 7 * 24 // 168 hours in a 7d quota window
-)
-
-// timeDecay5h returns a [0,1] multiplier: 0 at reset (fully recovered), 1 at
-// full window remaining. Accounts near their reset score lower and float to
-// the top of the candidate pool.
-func timeDecay5h(reset time.Time) float64 {
-	if reset.IsZero() {
-		return 1.0
-	}
-	minsLeft := time.Until(reset).Minutes()
-	if minsLeft <= 0 {
-		return 0.0
-	}
-	if minsLeft >= window5hMins {
-		return 1.0
-	}
-	return minsLeft / window5hMins
-}
-
-func timeDecay7d(reset time.Time) float64 {
-	if reset.IsZero() {
-		return 1.0
-	}
-	hoursLeft := time.Until(reset).Hours()
-	if hoursLeft <= 0 {
-		return 0.0
-	}
-	if hoursLeft >= window7dHours {
-		return 1.0
-	}
-	return hoursLeft / window7dHours
-}
-
-// WaterScore computes the water-filling score for an account (lower = preferred).
+// WaterScore computes the selection score for an account (lower = preferred).
 //
-// Score = max(5h_util × decay5h, 7d_util × decay7d)
+// Score = 0.7×5h_util + 0.3×7d_util
 //
-// Both dimensions are in [0,1]. The max ensures the worse dimension dominates.
-// Time-decay naturally de-prioritizes accounts far from their reset window and
-// promotes accounts that are near reset (effectively free capacity soon).
-// unknownWater is the water score returned when no rate-limit data has arrived
-// yet (e.g. startup ping failed). 1.0 (worst possible) keeps uninitialized
-// accounts at the back of the queue until a real ping updates their state.
+// unknownWater is returned when no rate-limit data has arrived yet (e.g. startup
+// ping failed). 1.0 (worst possible) keeps uninitialized accounts at the back of
+// the queue until a real ping updates their state.
 const unknownWater = 1.0
 
 func WaterScore(rl RateLimit) float64 {
-	// No rate-limit data yet — treat as neutral, not "best available".
 	if rl.FiveHourReset.IsZero() && rl.SevenDayReset.IsZero() {
 		return unknownWater
 	}
-	s5h := rl.FiveHourUtil * timeDecay5h(rl.FiveHourReset)
-	s7d := rl.SevenDayUtil * timeDecay7d(rl.SevenDayReset)
-	if s5h > s7d {
-		return s5h
-	}
-	return s7d
+	return 0.7*rl.FiveHourUtil + 0.3*rl.SevenDayUtil
 }
 
 // priorityBandSize is the water score offset applied per priority level.

@@ -193,51 +193,22 @@ func TestSoonestResetConsidersBothWindows(t *testing.T) {
 
 func TestWaterScore(t *testing.T) {
 	const eps = 1e-6
-	farFuture := time.Now().Add(200 * time.Hour) // beyond both windows → decay=1
+	nonZero := time.Now().Add(1 * time.Hour) // just needs to be non-zero
 
-	// 5h dominates: max(0.64*1, 0.27*1) = 0.64
-	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27, FiveHourReset: farFuture, SevenDayReset: farFuture}
+	// 0.7*0.64 + 0.3*0.27 = 0.448 + 0.081 = 0.529
+	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27, FiveHourReset: nonZero, SevenDayReset: nonZero}
 	ws := WaterScore(rl)
-	if ws < 0.64-eps || ws > 0.64+eps {
-		t.Errorf("5h-dominant: want 0.640000, got %.6f", ws)
+	want := 0.7*0.64 + 0.3*0.27
+	if ws < want-eps || ws > want+eps {
+		t.Errorf("want %.6f, got %.6f", want, ws)
 	}
 
-	// 7d dominates: max(0.10*1, 0.81*1) = 0.81
-	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81, FiveHourReset: farFuture, SevenDayReset: farFuture}
+	// 7d has higher raw util: 0.7*0.10 + 0.3*0.81 = 0.07 + 0.243 = 0.313
+	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81, FiveHourReset: nonZero, SevenDayReset: nonZero}
 	ws2 := WaterScore(rl2)
-	if ws2 < 0.81-eps || ws2 > 0.81+eps {
-		t.Errorf("7d-dominant: want 0.810000, got %.6f", ws2)
-	}
-}
-
-func TestWaterScoreTimeDecay(t *testing.T) {
-	// 5h=90%, resets in 30 of 300 minutes → decay=0.10 → effective_5h=0.09
-	// 7d=50%, resets far future → effective_7d=0.50
-	// water = max(0.09, 0.50) = 0.50
-	const eps = 0.01
-	resetSoon := time.Now().Add(30 * time.Minute)
-	farFuture := time.Now().Add(200 * time.Hour)
-	rl := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.50, FiveHourReset: resetSoon, SevenDayReset: farFuture}
-	ws := WaterScore(rl)
-	if ws < 0.50-eps || ws > 0.50+eps {
-		t.Errorf("time-decayed 5h: want ~0.50, got %.6f", ws)
-	}
-
-	// Must score lower than same account with far 5h reset
-	rlFar := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.50, FiveHourReset: farFuture, SevenDayReset: farFuture}
-	wsFar := WaterScore(rlFar)
-	if ws >= wsFar {
-		t.Errorf("near-reset account should score lower: near=%.4f far=%.4f", ws, wsFar)
-	}
-}
-
-func TestWaterScoreZeroReset(t *testing.T) {
-	// Reset already past → decay=0 → effective util=0 → score=0
-	pastReset := time.Now().Add(-1 * time.Minute)
-	rl := RateLimit{FiveHourUtil: 0.95, SevenDayUtil: 0.95, FiveHourReset: pastReset, SevenDayReset: pastReset}
-	ws := WaterScore(rl)
-	if ws > 1e-9 {
-		t.Errorf("past-reset account should score 0, got %.6f", ws)
+	want2 := 0.7*0.10 + 0.3*0.81
+	if ws2 < want2-eps || ws2 > want2+eps {
+		t.Errorf("want %.6f, got %.6f", want2, ws2)
 	}
 }
 
