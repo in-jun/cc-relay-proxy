@@ -194,35 +194,46 @@ func TestSoonestResetConsidersBothWindows(t *testing.T) {
 
 func TestWaterScore(t *testing.T) {
 	const eps = 1e-6
-	// farFuture: no reset bonus (t >= planHours=5h) → score = max(5h_util, 7d_util).
-	farFuture := time.Now().Add(200 * time.Hour)
+	// farFuture: beyond each window → no bonus → score = max(5h_util, 7d_util).
+	far5h := time.Now().Add(10 * time.Hour)   // > 5h window
+	far7d := time.Now().Add(200 * time.Hour)  // > 168h window
 
-	// 5h dominates: max(0.64, 0.27) = 0.64
-	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27, FiveHourReset: farFuture, SevenDayReset: farFuture}
+	// 5h dominates when no resets imminent: max(0.64, 0.27) = 0.64
+	rl := RateLimit{FiveHourUtil: 0.64, SevenDayUtil: 0.27, FiveHourReset: far5h, SevenDayReset: far7d}
 	if ws := WaterScore(rl); math.Abs(ws-0.64) > eps {
 		t.Errorf("5h dominates: want 0.64, got %f", ws)
 	}
 
 	// 7d dominates: max(0.10, 0.81) = 0.81
-	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81, FiveHourReset: farFuture, SevenDayReset: farFuture}
+	rl2 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.81, FiveHourReset: far5h, SevenDayReset: far7d}
 	if ws := WaterScore(rl2); math.Abs(ws-0.81) > eps {
 		t.Errorf("7d dominates: want 0.81, got %f", ws)
 	}
 
 	// 5h reset in 2.5h: bonus = (5-2.5)/5 = 0.50 → adj5h = max(0, 0.90-0.50) = 0.40
-	// adj7d = 0.10 (no bonus) → score = max(0.40, 0.10) = 0.40
+	// adj7d = 0.10 (no bonus, far7d > 168h) → score = max(0.40, 0.10) = 0.40
 	reset5h := time.Now().Add(150 * time.Minute) // 2.5h
-	rl3 := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.10, FiveHourReset: reset5h, SevenDayReset: farFuture}
+	rl3 := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.10, FiveHourReset: reset5h, SevenDayReset: far7d}
 	if ws := WaterScore(rl3); math.Abs(ws-0.40) > eps {
-		t.Errorf("reset bonus 2.5h: want 0.40, got %f", ws)
+		t.Errorf("5h reset bonus 2.5h: want 0.40, got %f", ws)
 	}
 
-	// 5h reset in 5min (0.083h): bonus = (5-0.083)/5 = 0.983 → adj5h = max(0, 0.90-0.983) = 0
-	// adj7d = 0.05 → score = 0.05 (near-reset account ranked almost free)
+	// 5h reset in 5min (0.083h): bonus = (5-0.083)/5 = 0.983 → adj5h = 0
+	// adj7d = 0.05 → score = 0.05 (near-reset account ranked nearly free)
 	reset5min := time.Now().Add(5 * time.Minute)
-	rl4 := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.05, FiveHourReset: reset5min, SevenDayReset: farFuture}
+	rl4 := RateLimit{FiveHourUtil: 0.90, SevenDayUtil: 0.05, FiveHourReset: reset5min, SevenDayReset: far7d}
 	if ws := WaterScore(rl4); math.Abs(ws-0.05) > eps {
-		t.Errorf("reset imminent: want 0.05, got %f", ws)
+		t.Errorf("5h reset imminent: want 0.05, got %f", ws)
+	}
+
+	// 7d reset in 20h (symmetric bonus): bonus = (168-20)/168 = 0.881
+	// adj7d = max(0, 0.90-0.881) = 0.019; adj5h = 0.10 → score = max(0.10, 0.019) = 0.10
+	reset7d20h := time.Now().Add(20 * time.Hour)
+	rl5 := RateLimit{FiveHourUtil: 0.10, SevenDayUtil: 0.90, FiveHourReset: far5h, SevenDayReset: reset7d20h}
+	wantAdj7d := math.Max(0, 0.90-148.0/168.0)
+	want5 := math.Max(0.10, wantAdj7d)
+	if ws := WaterScore(rl5); math.Abs(ws-want5) > eps {
+		t.Errorf("7d reset in 20h: want %.6f, got %f", want5, ws)
 	}
 
 	// Unknown (zero resets) → unknownWater = 1.0
