@@ -507,7 +507,10 @@ func (p *Pool) SelectBest() (name string, prevName string, switched bool, reason
 	}
 
 	// Priority 2: proactive switch — use lowest effective-water account.
-	if bestIdx >= 0 && bestEffective < curEffective {
+	// Skip if current account has no ping data yet (unknownWater); wait for a
+	// real ping before making proactive decisions to avoid cascade-switching.
+	curHasData := !curRL.FiveHourReset.IsZero() || !curRL.SevenDayReset.IsZero()
+	if curHasData && bestIdx >= 0 && bestEffective < curEffective {
 		from := p.accounts[p.active].Name
 		p.active = bestIdx
 		to := p.accounts[p.active].Name
