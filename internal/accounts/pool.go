@@ -344,43 +344,45 @@ func (p *Pool) RateLimitFor(name string) RateLimit {
 // of the queue until a real ping updates their state.
 const unknownWater = 1.0
 
-// WaterScore returns the effective-load score for an account (lower = preferred).
+// WaterScore returns the over-pace load score for an account (lower = preferred).
 //
 // # Design
 //
-// Anthropic enforces two independent periodic token-bucket windows:
+// Anthropic enforces two independent fixed-window rate limits. Each window
+// resets completely at a known timestamp — all consumed tokens are returned
+// at once, not gradually.
 //
 //	dimension d ∈ {5h, 7d}
-//	  capacity  C_d  (normalized to 1.0)
-//	  consumed  u_d  (0.0–1.0, reported as utilization)
-//	  resets in t_d  hours from now
-//	  window    W_d  (5h or 168h)
+//	  u_d   = current utilization (0.0–1.0)
+//	  t_d   = hours until reset
+//	  W_d   = window size (5 or 168)
+//	  pace  = (W_d − t_d) / W_d   (fraction of window already elapsed)
 //
-// At the reset time, all consumed tokens are returned. The capacity that will
-// be automatically recovered when the window resets in t_d hours is:
+// "Pace" is the utilization that a uniformly-consuming account would show
+// at this point in the window. An account at exactly pace will exhaust its
+// quota at precisely the reset time — it is just barely safe.
 //
-//	recovered_d = (W_d − t_d) / W_d
+// The over-pace score for dimension d:
 //
-// That is the fraction of the window that has already elapsed — the same
-// fraction of capacity is already "earned back" and waiting to be released.
+//	adj_d = max(0, u_d − pace_d)
 //
-// The net permanently-consumed fraction (capacity consumed beyond the next
-// reset) for each dimension is:
+// adj_d = 0  → at or below pace; at current rate the account will not
+//              exhaust its quota before the window resets.
+// adj_d > 0  → above pace; if usage continues at this rate the quota will
+//              be exhausted before reset, risking a 429.
 //
-//	adj_d = max(0, u_d − recovered_d)
-//	      = max(0, u_d − (W_d − t_d) / W_d)   for t_d ∈ (0, W_d)
-//	      = u_d                                 for t_d ≥ W_d (reset out of horizon)
+// Verification:
 //
-// Using each window's own size as the planning horizon ensures both dimensions
-// are treated symmetrically: an account whose 5h resets in 1h gets the same
-// proportional credit as one whose 7d resets in 20h.
+//	u=0.90, t=2.5h, W=5h  → pace=0.50 → adj=0.40  (40% over midpoint pace)
+//	u=0.90, t=5min, W=5h  → pace≈1.00 → adj≈0.00  (window almost reset, safe)
+//	u=0.50, t=2.5h, W=5h  → pace=0.50 → adj=0.00  (exactly on pace, safe)
+//	u=0.90, t>5h,   W=5h  → pace=0    → adj=0.90  (no reset in horizon)
 //
-// The final score is the dominant (worst) dimension:
+// The final score uses the dominant (worst) dimension:
 //
 //	score = max(adj_5h, adj_7d)
 //
-// This ensures a heavily loaded window drives the score even when the other is
-// healthy — you cannot freely use an account whose 7d quota is exhausted.
+// Either exhausted window makes the account unusable; the worst constraint wins.
 func WaterScore(rl RateLimit) float64 {
 	if rl.FiveHourReset.IsZero() && rl.SevenDayReset.IsZero() {
 		return unknownWater
@@ -390,16 +392,16 @@ func WaterScore(rl RateLimit) float64 {
 	return math.Max(adj5h, adj7d)
 }
 
-// recovered returns the fraction of a rate-limit window that will be
-// automatically returned at the upcoming reset, normalised to [0, 1].
+// recovered returns the elapsed fraction of the rate-limit window, which is
+// the time-proportional pace baseline used by WaterScore.
 //
 //	recovered = (W − t) / W   for t ∈ (0, W)
-//	          = 0             if t ≥ W  (reset beyond planning horizon)
+//	          = 0             if t ≥ W  (reset too far away — no pace credit)
 //	          = 0             if reset is zero (no data)
 //
-// W is the window size in hours; t is hours until reset.
-// The formula is the fraction of the window that has already elapsed:
-// that same fraction of capacity is waiting to be released at reset time.
+// W is the window size in hours; t is hours until next reset.
+// The function name "recovered" describes its role in WaterScore: it is the
+// pace fraction subtracted from utilization to compute the over-pace excess.
 func recovered(reset time.Time, windowHours float64) float64 {
 	if reset.IsZero() {
 		return 0
