@@ -774,7 +774,7 @@ func TestRunResetTickerFires(t *testing.T) {
 	// pingInterval=10s so only the reset ticker fires within the 50ms window.
 	origPing := pingInterval
 	origReset := resetCheckInterval
-	pingInterval = 10 * time.Second    // won't fire during 50ms window
+	pingInterval = 10 * time.Second // won't fire during 50ms window
 	resetCheckInterval = 1 * time.Millisecond
 	defer func() {
 		pingInterval = origPing
@@ -890,8 +890,8 @@ func TestProxySwitchedOnInitialSelect(t *testing.T) {
 	pool := accounts.NewPool(accts)
 	// Pre-reject a1 so SelectBest immediately picks a2 (switched=true).
 	pool.UpdateRateLimit("a1", accounts.RateLimit{
-		Status:       "rejected",
-		FiveHourUtil: 1.0,
+		Status:        "rejected",
+		FiveHourUtil:  1.0,
 		FiveHourReset: time.Now().Add(5 * time.Minute),
 	})
 
@@ -1078,7 +1078,7 @@ func TestProxyStripsXApiKeyAndAddsOAuthHeaders(t *testing.T) {
 	srv := NewWithTarget(pool, l, upstream.URL)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
-	req.Header.Set("x-api-key", "fake-api-key")  // API key mode
+	req.Header.Set("x-api-key", "fake-api-key") // API key mode
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleProxy(w, req)

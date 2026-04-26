@@ -416,8 +416,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		IsActive       bool         `json:"isActive"`
 		Priority       int          `json:"priority"`
 		Status         string       `json:"status"`
-		Water          float64      `json:"water"`          // effective water (used for selection)
-		RawWater       float64      `json:"rawWater"`       // raw water without priority offset
+		Water          float64      `json:"water"`    // effective water (used for selection)
+		RawWater       float64      `json:"rawWater"` // raw water without priority offset
 		FiveHour       fiveHourInfo `json:"fiveHour"`
 		SevenDay       sevenDayInfo `json:"sevenDay"`
 		TokenExpiresIn string       `json:"tokenExpiresIn"`

@@ -117,4 +117,3 @@ func (l *Logger) ReadLines() []map[string]any {
 	}
 	return result
 }
-
