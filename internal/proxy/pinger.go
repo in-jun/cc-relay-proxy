@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -229,7 +230,13 @@ func (p *Pinger) pingAccount(ctx context.Context, name string) {
 		return
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[pinger] unexpected status %d for %s: %s", resp.StatusCode, name, body)
+		p.log.Log("error", name, map[string]any{"code": "ping_non200", "status": resp.StatusCode, "body": string(body)})
+		return
+	}
 
 	rl, hasRL := accounts.ParseRateLimitHeaders(resp.Header)
 	if hasRL {
@@ -241,6 +248,8 @@ func (p *Pinger) pingAccount(ctx context.Context, name string) {
 			"status":    rl.Status,
 			"latencyMs": time.Since(start).Milliseconds(),
 		})
+	} else {
+		log.Printf("[pinger] no rate-limit headers in response for %s (status %d)", name, resp.StatusCode)
 	}
 }
 
