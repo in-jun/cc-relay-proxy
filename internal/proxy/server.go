@@ -287,6 +287,20 @@ func (s *Server) handle429(ctx context.Context, w http.ResponseWriter, r *http.R
 	}
 	s.stats.Total429.Add(1)
 
+	// Race fix: if the active account changed while this request was in flight
+	// (e.g. a periodic ping triggered a proactive switch), the 429 came from a
+	// now-inactive account. Just retry on the new active — no SelectBest needed.
+	if curActive := s.pool.ActiveName(); curActive != accountName {
+		s.log.Log("account_switched", curActive, map[string]any{
+			"from":   accountName,
+			"to":     curActive,
+			"reason": "race: active changed during in-flight 429",
+		})
+		s.log.Log("429_received", accountName, map[string]any{"action": "switch", "fiveHour": s.pool.RateLimitFor(accountName).FiveHourUtil})
+		resp.Body.Close()
+		return true
+	}
+
 	nextName, _, switched, reason := s.pool.SelectBest()
 	if switched {
 		s.stats.TotalSwitches.Add(1)
